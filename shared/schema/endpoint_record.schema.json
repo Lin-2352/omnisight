@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Live tunnel location published by the Kaggle node to the public gist.\n\nThe field names are the fixed gist schema::\n\n    {\n      \"omnisight_endpoint\": \"https://<subdomain>.trycloudflare.com\",\n      \"model\": \"Qwen2-VL-7B-Instruct-4bit\",\n      \"status\": \"online\",\n      \"updated_at\": \"<ISO-8601-UTC-Timestamp>\",\n      \"gpu_device\": \"Tesla T4 16GB\"\n    }\n\nThe gist is world-readable: this model must never carry credentials.\nContract compatibility is checked through ``GET /v1/health``, not here.",
+  "properties": {
+    "gpu_device": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Gpu Device",
+      "type": "string"
+    },
+    "model": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Model",
+      "type": "string"
+    },
+    "omnisight_endpoint": {
+      "format": "uri",
+      "maxLength": 2083,
+      "minLength": 1,
+      "title": "Omnisight Endpoint",
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "starting",
+        "online",
+        "offline"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "updated_at": {
+      "format": "date-time",
+      "title": "Updated At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "omnisight_endpoint",
+    "model",
+    "status",
+    "updated_at",
+    "gpu_device"
+  ],
+  "title": "EndpointRecord",
+  "type": "object",
+  "x-contract-version": "2.0.0",
+  "x-generated-by": "omnisight_contracts.export_schema (do not edit by hand)"
+}

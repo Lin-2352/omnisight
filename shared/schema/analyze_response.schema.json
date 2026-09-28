@@ -1,0 +1,183 @@
+{
+  "$defs": {
+    "CodeBlock": {
+      "description": "A fenced code block extracted from the model's markdown answer.",
+      "properties": {
+        "code": {
+          "title": "Code",
+          "type": "string"
+        },
+        "language": {
+          "default": "text",
+          "maxLength": 32,
+          "title": "Language",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code"
+      ],
+      "title": "CodeBlock",
+      "type": "object"
+    },
+    "InferenceTimings": {
+      "description": "Latency and throughput measurements for one generation.",
+      "properties": {
+        "queue_ms": {
+          "default": 0.0,
+          "minimum": 0.0,
+          "title": "Queue Ms",
+          "type": "number"
+        },
+        "tokens_generated": {
+          "minimum": 0,
+          "title": "Tokens Generated",
+          "type": "integer"
+        },
+        "tokens_per_sec": {
+          "minimum": 0.0,
+          "title": "Tokens Per Sec",
+          "type": "number"
+        },
+        "total_ms": {
+          "minimum": 0.0,
+          "title": "Total Ms",
+          "type": "number"
+        },
+        "ttft_ms": {
+          "description": "Time to first generated token.",
+          "minimum": 0.0,
+          "title": "Ttft Ms",
+          "type": "number"
+        }
+      },
+      "required": [
+        "ttft_ms",
+        "total_ms",
+        "tokens_generated",
+        "tokens_per_sec"
+      ],
+      "title": "InferenceTimings",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Successful body of ``POST /v1/analyze`` (and of the web fallback route).",
+  "properties": {
+    "code_blocks": {
+      "items": {
+        "$ref": "#/$defs/CodeBlock"
+      },
+      "maxItems": 50,
+      "title": "Code Blocks",
+      "type": "array"
+    },
+    "confidence": {
+      "anyOf": [
+        {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Geometric-mean probability of the generated tokens under the raw model distribution; null when the producing backend cannot measure it.",
+      "title": "Confidence"
+    },
+    "contract_version": {
+      "default": "2.0.0",
+      "title": "Contract Version",
+      "type": "string"
+    },
+    "created_utc": {
+      "format": "date-time",
+      "title": "Created Utc",
+      "type": "string"
+    },
+    "detected_language": {
+      "anyOf": [
+        {
+          "maxLength": 32,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detected Language"
+    },
+    "finish_reason": {
+      "default": "stop",
+      "enum": [
+        "stop",
+        "length",
+        "timeout"
+      ],
+      "title": "Finish Reason",
+      "type": "string"
+    },
+    "markdown": {
+      "maxLength": 65536,
+      "title": "Markdown",
+      "type": "string"
+    },
+    "model_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Model Id",
+      "type": "string"
+    },
+    "request_id": {
+      "format": "uuid",
+      "title": "Request Id",
+      "type": "string"
+    },
+    "source": {
+      "enum": [
+        "kaggle",
+        "gemini",
+        "deterministic"
+      ],
+      "title": "Source",
+      "type": "string"
+    },
+    "summary": {
+      "maxLength": 500,
+      "title": "Summary",
+      "type": "string"
+    },
+    "timings": {
+      "$ref": "#/$defs/InferenceTimings"
+    },
+    "transcript": {
+      "anyOf": [
+        {
+          "maxLength": 4000,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "ASR text for voice queries.",
+      "title": "Transcript"
+    }
+  },
+  "required": [
+    "request_id",
+    "model_id",
+    "source",
+    "summary",
+    "markdown",
+    "timings"
+  ],
+  "title": "AnalyzeResponse",
+  "type": "object",
+  "x-contract-version": "2.0.0",
+  "x-generated-by": "omnisight_contracts.export_schema (do not edit by hand)"
+}

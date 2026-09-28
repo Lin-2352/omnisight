@@ -1,0 +1,195 @@
+{
+  "$defs": {
+    "AnalysisMode": {
+      "description": "What the user wants from the captured screen.",
+      "enum": [
+        "explain",
+        "debug",
+        "summarize",
+        "ocr",
+        "voice_query"
+      ],
+      "title": "AnalysisMode",
+      "type": "string"
+    },
+    "AudioPayload": {
+      "additionalProperties": false,
+      "description": "A push-to-talk voice clip (16-bit PCM WAV).",
+      "properties": {
+        "data_b64": {
+          "title": "Data B64",
+          "type": "string"
+        },
+        "duration_ms": {
+          "maximum": 30000,
+          "minimum": 1,
+          "title": "Duration Ms",
+          "type": "integer"
+        },
+        "mime": {
+          "const": "audio/wav",
+          "default": "audio/wav",
+          "enum": [
+            "audio/wav"
+          ],
+          "title": "Mime",
+          "type": "string"
+        },
+        "sample_rate": {
+          "maximum": 48000,
+          "minimum": 8000,
+          "title": "Sample Rate",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "data_b64",
+        "sample_rate",
+        "duration_ms"
+      ],
+      "title": "AudioPayload",
+      "type": "object"
+    },
+    "ClientInfo": {
+      "additionalProperties": false,
+      "description": "Identifies the calling surface for telemetry and debugging.",
+      "properties": {
+        "kind": {
+          "enum": [
+            "desktop",
+            "web",
+            "benchmark",
+            "test"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "platform": {
+          "default": "",
+          "maxLength": 64,
+          "title": "Platform",
+          "type": "string"
+        },
+        "version": {
+          "maxLength": 32,
+          "pattern": "^\\d+\\.\\d+\\.\\d+([-+][0-9A-Za-z.-]+)?$",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "version"
+      ],
+      "title": "ClientInfo",
+      "type": "object"
+    },
+    "ImagePayload": {
+      "additionalProperties": false,
+      "description": "A single compressed screenshot, base64 encoded.",
+      "properties": {
+        "data_b64": {
+          "description": "Standard base64 (RFC 4648) without a data-URL prefix.",
+          "title": "Data B64",
+          "type": "string"
+        },
+        "height": {
+          "maximum": 8192,
+          "minimum": 1,
+          "title": "Height",
+          "type": "integer"
+        },
+        "mime": {
+          "enum": [
+            "image/jpeg",
+            "image/png",
+            "image/webp"
+          ],
+          "title": "Mime",
+          "type": "string"
+        },
+        "width": {
+          "maximum": 8192,
+          "minimum": 1,
+          "title": "Width",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "mime",
+        "data_b64",
+        "width",
+        "height"
+      ],
+      "title": "ImagePayload",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Body of ``POST /v1/analyze``.",
+  "properties": {
+    "audio": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AudioPayload"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "client": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ClientInfo"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "image": {
+      "$ref": "#/$defs/ImagePayload"
+    },
+    "max_new_tokens": {
+      "default": 512,
+      "maximum": 512,
+      "minimum": 16,
+      "title": "Max New Tokens",
+      "type": "integer"
+    },
+    "mode": {
+      "$ref": "#/$defs/AnalysisMode",
+      "default": "explain"
+    },
+    "prompt": {
+      "default": "",
+      "maxLength": 4000,
+      "title": "Prompt",
+      "type": "string"
+    },
+    "request_id": {
+      "format": "uuid",
+      "title": "Request Id",
+      "type": "string"
+    },
+    "temperature": {
+      "default": 0.1,
+      "description": "Sampling temperature; 0 selects greedy decoding.",
+      "maximum": 1.5,
+      "minimum": 0.0,
+      "title": "Temperature",
+      "type": "number"
+    }
+  },
+  "required": [
+    "image"
+  ],
+  "title": "AnalyzeRequest",
+  "type": "object",
+  "x-contract-version": "2.0.0",
+  "x-generated-by": "omnisight_contracts.export_schema (do not edit by hand)"
+}

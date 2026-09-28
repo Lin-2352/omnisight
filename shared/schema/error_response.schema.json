@@ -1,0 +1,79 @@
+{
+  "$defs": {
+    "ErrorCode": {
+      "description": "Machine-readable failure categories returned in ``ErrorResponse``.",
+      "enum": [
+        "invalid_payload",
+        "payload_too_large",
+        "unauthorized",
+        "model_loading",
+        "gpu_oom",
+        "inference_timeout",
+        "upstream_unavailable",
+        "rate_limited",
+        "internal_error"
+      ],
+      "title": "ErrorCode",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Body returned with every non-2xx status from the inference node.",
+  "properties": {
+    "details": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 50,
+      "title": "Details",
+      "type": "array"
+    },
+    "error_code": {
+      "$ref": "#/$defs/ErrorCode"
+    },
+    "message": {
+      "maxLength": 2000,
+      "title": "Message",
+      "type": "string"
+    },
+    "request_id": {
+      "anyOf": [
+        {
+          "format": "uuid",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Request Id"
+    },
+    "retry_after_s": {
+      "anyOf": [
+        {
+          "minimum": 0.0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Retry After S"
+    },
+    "retryable": {
+      "default": false,
+      "title": "Retryable",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "error_code",
+    "message"
+  ],
+  "title": "ErrorResponse",
+  "type": "object",
+  "x-contract-version": "2.0.0",
+  "x-generated-by": "omnisight_contracts.export_schema (do not edit by hand)"
+}

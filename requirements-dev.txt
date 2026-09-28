@@ -1,0 +1,31 @@
+# =============================================================================
+# OmniSight developer / CI requirements
+# Runs the contract, API (FastAPI TestClient), and client-side test suites on a
+# plain CPU machine (Windows or Linux, Python 3.10-3.13). No torch required.
+#
+# Install from the repository root (the `-e .` line is resolved against the
+# current working directory):
+#   python -m venv .venv
+#   .\.venv\Scripts\Activate.ps1        # PowerShell
+#   python -m pip install -r requirements-dev.txt
+# =============================================================================
+
+# Shared data contracts (shared/omnisight_contracts), editable
+-e .
+
+# Contract + API layer (must match kaggle-server pins)
+pydantic==2.9.2
+fastapi==0.115.0
+# Starlette's TestClient in fastapi 0.115.0 relies on the httpx<0.28 `app=` API
+httpx==0.27.2
+# Local uvicorn runs of the node's HTTP layer in verification (matches kaggle-server)
+uvicorn==0.30.6
+
+# Test runner and tooling
+pytest==8.3.3
+packaging>=24.1
+
+# Image / numeric stack used by compression and payload tests
+pillow>=10.4.0
+numpy>=1.26.0
+requests==2.32.3

@@ -1,0 +1,29 @@
+# =============================================================================
+# OmniSight Windows desktop client: Python dependencies
+#
+# Target runtime : Windows 10 (1809+) / Windows 11, x64
+# Python         : 3.10 - 3.13 (PyQt6 6.7.1 ships abi3 wheels; every other pin
+#                  publishes win_amd64 wheels for cp313)
+#
+# Install from the repository root (PowerShell):
+#   python -m venv .venv
+#   .\.venv\Scripts\Activate.ps1
+#   python -m pip install -r desktop-client\requirements-windows.txt
+#   python -m pip install -e .            # shared omnisight_contracts package
+# =============================================================================
+
+# --- UI -------------------------------------------------------------------------
+PyQt6==6.7.1
+
+# --- Capture ----------------------------------------------------------------------
+mss==9.0.2
+pillow>=10.4.0
+sounddevice==0.5.0
+numpy>=1.26.0
+
+# --- Input hooks --------------------------------------------------------------------
+pynput==1.7.7
+
+# --- Networking + contracts ---------------------------------------------------------
+requests==2.32.3
+pydantic==2.9.2

@@ -1,0 +1,54 @@
+# =============================================================================
+# OmniSight line-ending & binary normalization
+# The repo is authored on Windows but executed on Linux (Kaggle, Vercel), so the
+# canonical form is LF. Only Windows-native scripts are checked out as CRLF.
+# =============================================================================
+
+* text=auto eol=lf
+
+# Source & config (explicit for clarity; inherits LF)
+*.py        text eol=lf diff=python
+*.ipynb     text eol=lf
+*.ts        text eol=lf
+*.tsx       text eol=lf
+*.js        text eol=lf
+*.mjs       text eol=lf
+*.cjs       text eol=lf
+*.json      text eol=lf
+*.md        text eol=lf diff=markdown
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.toml      text eol=lf
+*.txt       text eol=lf
+*.css       text eol=lf
+*.sh        text eol=lf
+.env.example text eol=lf
+
+# Windows-native scripts must keep CRLF to run correctly under cmd/PowerShell
+*.ps1       text eol=crlf
+*.psm1      text eol=crlf
+*.bat       text eol=crlf
+*.cmd       text eol=crlf
+
+# Binary assets: never normalize or diff
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.webp      binary
+*.ico       binary
+*.icns      binary
+*.woff      binary
+*.woff2     binary
+*.ttf       binary
+*.otf       binary
+*.wav       binary
+*.mp3       binary
+*.mp4       binary
+*.pdf       binary
+*.zip       binary
+*.exe       binary
+*.dll       binary
+
+# Generated JSON Schemas: collapse in PR diffs
+shared/schema/*.schema.json linguist-generated=true

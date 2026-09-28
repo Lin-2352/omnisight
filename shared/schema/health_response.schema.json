@@ -1,0 +1,183 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Body of ``GET /v1/health``.\n\nEvery ``*_mb`` field is in decimal megabytes (10**6 bytes), measured with\n``torch.cuda.memory_allocated`` / ``memory_reserved`` (the CUDA context that\nnvidia-smi additionally reports is not included).",
+  "properties": {
+    "asr_loaded": {
+      "default": false,
+      "title": "Asr Loaded",
+      "type": "boolean"
+    },
+    "asr_model_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Asr Model Id"
+    },
+    "baseline_vram_mb": {
+      "anyOf": [
+        {
+          "minimum": 0.0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Allocation right after the model finished loading.",
+      "title": "Baseline Vram Mb"
+    },
+    "compute_capability": {
+      "anyOf": [
+        {
+          "maxLength": 16,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Compute Capability"
+    },
+    "contract_version": {
+      "default": "2.0.0",
+      "title": "Contract Version",
+      "type": "string"
+    },
+    "detail": {
+      "anyOf": [
+        {
+          "maxLength": 2000,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detail"
+    },
+    "gpu_available": {
+      "title": "Gpu Available",
+      "type": "boolean"
+    },
+    "gpu_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Gpu Count",
+      "type": "integer"
+    },
+    "gpu_name": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Gpu Name"
+    },
+    "model_id": {
+      "title": "Model Id",
+      "type": "string"
+    },
+    "model_loaded": {
+      "title": "Model Loaded",
+      "type": "boolean"
+    },
+    "oom_events": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Oom Events",
+      "type": "integer"
+    },
+    "quantization": {
+      "enum": [
+        "nf4",
+        "int8",
+        "fp16",
+        "bf16",
+        "none"
+      ],
+      "title": "Quantization",
+      "type": "string"
+    },
+    "queue_depth": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Queue Depth",
+      "type": "integer"
+    },
+    "server_time_utc": {
+      "format": "date-time",
+      "title": "Server Time Utc",
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "ok",
+        "loading",
+        "degraded"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "uptime_s": {
+      "minimum": 0.0,
+      "title": "Uptime S",
+      "type": "number"
+    },
+    "vram_allocated_mb": {
+      "minimum": 0.0,
+      "title": "Vram Allocated Mb",
+      "type": "number"
+    },
+    "vram_ceiling_mb": {
+      "default": 0.0,
+      "minimum": 0.0,
+      "title": "Vram Ceiling Mb",
+      "type": "number"
+    },
+    "vram_peak_mb": {
+      "default": 0.0,
+      "minimum": 0.0,
+      "title": "Vram Peak Mb",
+      "type": "number"
+    },
+    "vram_reserved_mb": {
+      "minimum": 0.0,
+      "title": "Vram Reserved Mb",
+      "type": "number"
+    },
+    "vram_total_mb": {
+      "minimum": 0.0,
+      "title": "Vram Total Mb",
+      "type": "number"
+    }
+  },
+  "required": [
+    "status",
+    "model_id",
+    "model_loaded",
+    "quantization",
+    "gpu_available",
+    "vram_allocated_mb",
+    "vram_reserved_mb",
+    "vram_total_mb",
+    "uptime_s"
+  ],
+  "title": "HealthResponse",
+  "type": "object",
+  "x-contract-version": "2.0.0",
+  "x-generated-by": "omnisight_contracts.export_schema (do not edit by hand)"
+}

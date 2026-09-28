@@ -1,0 +1,197 @@
+# =============================================================================
+# OmniSight monorepo .gitignore
+# Covers: Windows desktop client (Python/PyQt6/PyInstaller), Kaggle inference
+# node (Jupyter/HF), and the Next.js web showcase (Vercel/Netlify).
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Secrets & environment files
+# Every .env variant is ignored; only the documented template is tracked.
+# -----------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+kaggle.json
+.kaggle/
+secrets.json
+credentials.json
+
+# -----------------------------------------------------------------------------
+# Windows OS artifacts
+# -----------------------------------------------------------------------------
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+desktop.ini
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+*.stackdump
+[Dd]esktop.ini
+
+# -----------------------------------------------------------------------------
+# macOS / Linux artifacts (contributors on other platforms)
+# -----------------------------------------------------------------------------
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.directory
+.Trash-*
+*~
+
+# -----------------------------------------------------------------------------
+# OS / runtime memory dumps and crash reports
+# -----------------------------------------------------------------------------
+*.dmp
+*.mdmp
+*.hdmp
+MEMORY.DMP
+Minidump/
+hs_err_pid*
+replay_pid*
+core.[0-9]*
+crashdump*/
+
+# -----------------------------------------------------------------------------
+# Python
+# -----------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+.Python
+.venv/
+venv/
+env/
+ENV/
+.python-version
+pip-wheel-metadata/
+*.egg-info/
+*.egg
+.eggs/
+.installed.cfg
+wheels/
+.pytest_cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.hypothesis/
+*.prof
+*.lprof
+
+# -----------------------------------------------------------------------------
+# PyInstaller / Windows installer build output
+# The curated desktop-client/omnisight.spec is tracked; generated specs are not.
+# -----------------------------------------------------------------------------
+build/
+dist/
+*.spec
+!desktop-client/omnisight.spec
+*.manifest
+*.msi
+*.msix
+installer-output/
+
+# -----------------------------------------------------------------------------
+# Jupyter / Kaggle
+# -----------------------------------------------------------------------------
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/*
+.jupyter/
+profile_default/
+ipython_config.py
+kaggle/working/
+kaggle-server/working/
+kaggle-server/outputs/
+kaggle-server/benchmark-results/
+
+# -----------------------------------------------------------------------------
+# Model weights & Hugging Face caches (never commit multi-GB artifacts)
+# -----------------------------------------------------------------------------
+*.safetensors
+*.bin
+*.gguf
+*.ckpt
+*.pt
+*.pth
+*.onnx
+.cache/
+hf_cache/
+huggingface/
+offload/
+
+# -----------------------------------------------------------------------------
+# Cloudflare tunnel binaries & logs
+# -----------------------------------------------------------------------------
+cloudflared
+cloudflared.exe
+cloudflared-*
+.cloudflared/
+tunnel*.log
+
+# -----------------------------------------------------------------------------
+# Node.js / Next.js / deployment platforms
+# -----------------------------------------------------------------------------
+node_modules/
+.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+.next/
+out/
+.turbo/
+.vercel/
+.netlify/
+*.tsbuildinfo
+next-env.d.ts
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.eslintcache
+.stylelintcache
+
+# -----------------------------------------------------------------------------
+# Logs, temp files, local captures
+# -----------------------------------------------------------------------------
+*.log
+logs/
+*.tmp
+*.temp
+*.swp
+*.swo
+captures/
+recordings/
+
+# -----------------------------------------------------------------------------
+# Editors / IDEs
+# -----------------------------------------------------------------------------
+.idea/
+*.iml
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json.example
+*.code-workspace
+.vs/
+*.suo
+*.user
+*.sln.docstates

@@ -1,0 +1,44 @@
+# =============================================================================
+# OmniSight Kaggle inference node: Python dependencies
+#
+# Target runtime : Kaggle notebook, GPU T4 x2 or P100, Linux x86_64
+# Python         : 3.12 on Kaggle today (Colab base image 2026-07-16). Supported
+#                  range is 3.10 - 3.12: torch 2.3.1 publishes no cp313 wheels, so
+#                  a Kaggle move to 3.13 requires a coordinated torch bump.
+#
+# Install (done by kaggle-server/omnisight_kaggle.ipynb):
+#   pip install -q -r kaggle-server/requirements-kaggle.txt
+#   pip install -q --no-deps .                                  # shared contracts
+# The node then runs in a fresh interpreter (python -u kaggle-server/launch.py),
+# so the pinned torch replaces the preinstalled build without a kernel restart.
+# Whisper (voice queries) needs no extra packages: transformers + numpy only.
+#
+# Pinning rationale:
+#   * torch/torchvision are a matched pair; mixing versions breaks the
+#     torchvision C++ ops the Qwen2-VL image processor relies on.
+#   * numpy<2: the torch 2.3.x wheels were compiled against the NumPy 1.x ABI.
+#   * transformers<4.50: 4.45.0 introduced Qwen2-VL; later releases raise the
+#     supported torch floor and change the processor API. Revisit on a torch bump.
+#   * bitsandbytes<0.46: newer releases drop builds validated against torch 2.3.
+# =============================================================================
+
+# --- Core deep-learning stack -------------------------------------------------
+torch==2.3.1
+torchvision==0.18.1
+transformers>=4.45.0,<4.50
+accelerate>=0.34.0,<2
+bitsandbytes>=0.43.0,<0.46
+numpy>=1.26.0,<2
+
+# --- Serving layer ------------------------------------------------------------
+fastapi==0.115.0
+uvicorn==0.30.6
+pydantic==2.9.2
+
+# --- Tunnel + endpoint publishing -----------------------------------------------
+pycloudflared==0.2.0
+requests==2.32.3
+
+# --- Image handling / telemetry ------------------------------------------------
+pillow>=10.4.0
+psutil>=5.9.8
