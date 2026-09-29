@@ -4,7 +4,14 @@ Import from this package, never from submodules, so internal layout can change
 without touching the server, client, or tests.
 """
 
-from .markdown import derive_summary, extract_code_blocks, normalize_language, strip_code_blocks
+from .markdown import (
+    MarkdownSegment,
+    derive_summary,
+    extract_code_blocks,
+    normalize_language,
+    split_markdown_segments,
+    strip_code_blocks,
+)
 from .models import (
     CONTRACT_VERSION,
     DEFAULT_TEMPERATURE,
@@ -62,6 +69,7 @@ __all__ = [
     "HealthResponse",
     "ImagePayload",
     "InferenceTimings",
+    "MarkdownSegment",
     "__version__",
     "decode_base64_strict",
     "derive_summary",
@@ -69,5 +77,6 @@ __all__ = [
     "extract_code_blocks",
     "normalize_language",
     "sniff_image_mime",
+    "split_markdown_segments",
     "strip_code_blocks",
 ]

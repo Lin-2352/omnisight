@@ -620,7 +620,7 @@ def save_report(result: BenchmarkResult, output_dir: Path) -> tuple[Path, Path]:
                 "mode": result.mode,
                 "started_utc": result.started_utc,
                 "environment": result.environment,
-                "slas": [dict(zip(("metric", "target", "measured", "verdict"), row)) for row in evaluate_slas(result)],
+                "slas": [dict(zip(("metric", "target", "measured", "verdict"), row, strict=True)) for row in evaluate_slas(result)],
                 "measurements": [asdict(m) for m in result.measurements],
             },
             indent=2,

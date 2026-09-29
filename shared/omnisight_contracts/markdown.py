@@ -12,7 +12,8 @@
 from __future__ import annotations
 
 import re
-from typing import Final
+from dataclasses import dataclass
+from typing import Final, Literal
 
 from .models import MAX_CODE_BLOCKS, MAX_SUMMARY_CHARS, CodeBlock
 
@@ -72,53 +73,66 @@ def _strip_indent(line: str, indent: int) -> str:
     return line[min(indent, removable) :]
 
 
-def extract_code_blocks(markdown: str, limit: int = MAX_CODE_BLOCKS) -> list[CodeBlock]:
-    """Return fenced code blocks in document order (at most ``limit`` blocks)."""
-    blocks: list[CodeBlock] = []
+@dataclass(frozen=True)
+class MarkdownSegment:
+    """A run of prose or one fenced code block, in document order."""
+
+    kind: Literal["prose", "code"]
+    text: str
+    language: str = "text"
+
+
+def split_markdown_segments(markdown: str) -> list[MarkdownSegment]:
+    """Split ``markdown`` into alternating prose and fenced-code segments.
+
+    Empty prose runs are dropped. Code segments keep their normalized language.
+    """
+    segments: list[MarkdownSegment] = []
+    prose: list[str] = []
     lines = markdown.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+
+    def flush_prose() -> None:
+        text = "\n".join(prose).strip("\n")
+        if text.strip():
+            segments.append(MarkdownSegment("prose", text))
+        prose.clear()
+
     index = 0
-    while index < len(lines) and len(blocks) < limit:
+    while index < len(lines):
         match = _OPEN_FENCE_RE.match(lines[index])
-        if match is None:
-            index += 1
-            continue
-        fence = match.group("fence")
-        info = match.group("info")
-        fence_char = fence[0]
         # A backtick fence's info string may not contain backticks (CommonMark 4.5).
-        if fence_char == "`" and "`" in info:
+        if match is None or (match.group("fence")[0] == "`" and "`" in match.group("info")):
+            prose.append(lines[index])
             index += 1
             continue
+        flush_prose()
+        fence = match.group("fence")
         indent = len(match.group("indent"))
-        close_re = re.compile(rf"^ {{0,3}}{re.escape(fence_char)}{{{len(fence)},}}[ \t]*$")
+        close_re = re.compile(rf"^ {{0,3}}{re.escape(fence[0])}{{{len(fence)},}}[ \t]*$")
         body: list[str] = []
         index += 1
         while index < len(lines) and close_re.match(lines[index]) is None:
             body.append(_strip_indent(lines[index], indent))
             index += 1
         index += 1  # skip closing fence (or step past EOF for unterminated blocks)
-        blocks.append(CodeBlock(language=normalize_language(info), code="\n".join(body)))
-    return blocks
+        segments.append(MarkdownSegment("code", "\n".join(body), normalize_language(match.group("info"))))
+    flush_prose()
+    return segments
+
+
+def extract_code_blocks(markdown: str, limit: int = MAX_CODE_BLOCKS) -> list[CodeBlock]:
+    """Return fenced code blocks in document order (at most ``limit`` blocks)."""
+    blocks = [
+        CodeBlock(language=segment.language, code=segment.text)
+        for segment in split_markdown_segments(markdown)
+        if segment.kind == "code"
+    ]
+    return blocks[:limit]
 
 
 def strip_code_blocks(markdown: str) -> str:
     """Return ``markdown`` with every fenced code block removed."""
-    output: list[str] = []
-    lines = markdown.replace("\r\n", "\n").replace("\r", "\n").split("\n")
-    index = 0
-    while index < len(lines):
-        match = _OPEN_FENCE_RE.match(lines[index])
-        if match is None or (match.group("fence")[0] == "`" and "`" in match.group("info")):
-            output.append(lines[index])
-            index += 1
-            continue
-        fence = match.group("fence")
-        close_re = re.compile(rf"^ {{0,3}}{re.escape(fence[0])}{{{len(fence)},}}[ \t]*$")
-        index += 1
-        while index < len(lines) and close_re.match(lines[index]) is None:
-            index += 1
-        index += 1
-    return "\n".join(output)
+    return "\n\n".join(segment.text for segment in split_markdown_segments(markdown) if segment.kind == "prose")
 
 
 def derive_summary(markdown: str, max_chars: int = MAX_SUMMARY_CHARS) -> str:

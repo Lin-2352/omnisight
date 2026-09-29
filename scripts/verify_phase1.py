@@ -64,7 +64,9 @@ WINDOWS_REQUIRED: dict[str, str] = {
     "requests": "==2.32.3",
     "pydantic": "==2.9.2",
     "sounddevice": "==0.5.0",
-    "numpy": ">=1.26.0",
+    "numpy": ">=1.26.4",
+    "pyqt6-qt6": "==6.7.3",
+    "python-dotenv": "==1.0.1",
 }
 
 MUST_BE_IGNORED: tuple[str, ...] = (
@@ -119,15 +121,16 @@ ENV_REQUIRED_KEYS: tuple[str, ...] = (
     "OMNISIGHT_MODEL_ID",
     "OMNISIGHT_PORT",
     "OMNISIGHT_API_KEY",
-    "OMNISIGHT_GIST_OWNER",
-    "OMNISIGHT_ENDPOINT_OVERRIDE",
+    "GITHUB_GIST_ID",
+    "MANUAL_OVERRIDE_URL",
+    "FALLBACK_API_URL",
     "GEMINI_API_KEY",
     "FALLBACK_MODEL",
     "NEXT_PUBLIC_GIST_RAW_URL",
     "NEXT_PUBLIC_RELEASE_URL",
 )
 
-SECRET_KEYS: tuple[str, ...] = ("GITHUB_TOKEN", "OMNISIGHT_API_KEY", "GEMINI_API_KEY", "HF_TOKEN")
+SECRET_KEYS: tuple[str, ...] = ("GITHUB_TOKEN", "OMNISIGHT_CLIENT_GITHUB_TOKEN", "OMNISIGHT_API_KEY", "GEMINI_API_KEY", "HF_TOKEN")
 SECRET_VALUE_PREFIXES: tuple[str, ...] = ("ghp_", "gho_", "github_pat_", "AIza", "hf_", "sk-")
 
 KAGGLE_PYTHON_VERSIONS: tuple[str, ...] = ("3.11", "3.12")
