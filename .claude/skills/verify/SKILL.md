@@ -35,7 +35,7 @@ The surface is the public HTTPS API of the node running on Kaggle. This dev box 
 5. **Stop.** Click **Cancel Run** (the button shows as "Stop execution"). The gist should flip to `offline` within seconds, and the tunnel should return HTTP 530. Then click **Stop session** so it stops using the 30 h/week GPU quota.
 
 ## Automated suites (run these first; see tests/README.md)
-- **Deterministic CI suite** (about 17 s, no network): `.venv\Scripts\python -m pytest -v --cov`. Expected: 367 passed, 2 skipped, coverage at least 85% (currently 95%). The 2 skips are the torch-only hardware modules.
+- **Deterministic CI suite** (about 17 s, no network): `.venv\Scripts\python -m pytest -v --cov`. Expected: 370 passed, 2 skipped, coverage at least 85% (currently 95%). The 2 skips are the torch-only hardware modules.
 - **Real GPU** (RTX 4060): `.venv-gpu\Scripts\python -m pytest -m "gpu or model" -s tests/hardware/test_local_gpu.py`. It covers a real CUDA OOM → 507, then the 2B model, Whisper, and tokenizer-level injection.
 - **Real CPU** (needs 10.5 GB of free RAM): `.venv-gpu\Scripts\python -m pytest -m cpu_inference -s tests/hardware/test_local_cpu.py`.
 - **This PC's capability:** `python scripts/capability_report.py`, or `pytest -m hardware -s tests/hardware/test_capability.py`.
