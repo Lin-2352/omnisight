@@ -1,0 +1,99 @@
+name: test-suite
+
+# Full OmniSight test matrix. Standard CI is deterministic and offline: every remote call
+# (gist API, Kaggle tunnel, Gemini) is mocked. GPU, model, CPU-inference, display and live
+# network suites are opt-in markers run on developer hardware (see tests/README.md).
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-suite-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python-windows:
+    name: Windows client + contracts (coverage >= 85%)
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the secret audit scans the full history
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: |
+            requirements-dev.txt
+            desktop-client/requirements-windows.txt
+      - name: Install
+        run: python -m pip install -r requirements-dev.txt -r desktop-client/requirements-windows.txt
+      - name: pytest (unit, integration, performance, security) with coverage floor
+        timeout-minutes: 3
+        run: >
+          python -m pytest -v --durations=10
+          --cov=desktop-client/core --cov=desktop-client/capture --cov=desktop-client/network
+          --cov=shared/omnisight_contracts --cov-report=term-missing --cov-fail-under=85
+
+  python-ubuntu:
+    name: Server, contracts and security (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - name: Install
+        run: python -m pip install -r requirements-dev.txt
+      - name: pytest (client-only modules are skipped off Windows)
+        timeout-minutes: 3
+        run: >
+          python -m pytest -v --durations=10
+          --cov=shared/omnisight_contracts --cov-report=term-missing --cov-fail-under=85
+      - name: Phase 1 and 2 verification scripts
+        timeout-minutes: 3
+        run: |
+          python scripts/verify_phase1.py
+          python scripts/verify_phase2.py
+
+  web:
+    name: Web showcase (types, lint, build, Vitest, e2e)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web-showcase
+    env:
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web-showcase/package-lock.json
+      - run: npm ci
+      - name: Contract types match shared/schema
+        run: npm run check:types
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run build
+      - name: Vitest route-handler suite
+        timeout-minutes: 3
+        run: npm test
+      - name: End-to-end failover against next start
+        timeout-minutes: 3
+        run: npm run test:e2e

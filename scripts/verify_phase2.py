@@ -414,7 +414,8 @@ def _engine_spec() -> str:
         expect(key in gen_kwargs, f"generate() missing {key}")
     for needle in (
         "set_per_process_memory_fraction",
-        "except torch.cuda.OutOfMemoryError",
+        # CUDA OOM (and MemoryError in CPU mode) both take the 507 recovery path.
+        "except (torch.cuda.OutOfMemoryError, MemoryError)",
         "gc.collect()",
         "torch.cuda.empty_cache()",
         # Regression guard: a 4-bit vision tower reports uint8 storage as its dtype,

@@ -14,7 +14,7 @@ const SECTIONS = [
   ["discovery", "Node discovery"],
   ["benchmarks", "Measured benchmarks"],
   ["kaggle", "Run the Kaggle node"],
-  ["local-gpu", "Run on your own GPU"],
+  ["local-gpu", "Run on your own GPU or CPU"],
   ["windows-client", "Windows client"],
   ["web", "This web app"],
   ["api", "API contract"],
@@ -30,6 +30,9 @@ const BENCHMARKS: { metric: string; value: string; target: string; note: string 
   { metric: "Local GPU: time to first token", value: "1.35 s", target: "", note: "RTX 4060 Laptop 8 GB, Qwen2-VL-2B NF4, n=36" },
   { metric: "Local GPU: decode speed", value: "34.6 tok/s", target: "", note: "Same run; p5 32.3 tok/s" },
   { metric: "Local GPU: VRAM", value: "1 528 / 3 167 MB", target: "6 000 MB", note: "Baseline / peak; Whisper-base adds 149 MB" },
+  { metric: "Local CPU: time to first token", value: "~14 s", target: "", note: "i9-13980HX (AVX2), Qwen2-VL-2B float32, 896x504 pixels" },
+  { metric: "Local CPU: decode speed", value: "~5 tok/s", target: "", note: "Same run; RAM peak 10.5 GB" },
+  { metric: "Screen encode (1440p -> 1280x720)", value: "~8 ms", target: "35 ms p95", note: "Box pre-reduce + HAMMING + JPEG q75 4:4:4; text SSIM >= 0.98 vs LANCZOS" },
 ];
 
 function Section({ id, title, children }: { id: string; title: string; children: ReactNode }) {
@@ -169,14 +172,23 @@ export default function DocsPage() {
             </p>
           </Section>
 
-          <Section id="local-gpu" title="Run on your own GPU">
+          <Section id="local-gpu" title="Run on your own GPU or CPU">
             <p>
-              The same server runs on a Windows PC with an NVIDIA GPU. It needs no tunnel and no gist, and binds to{" "}
-              <C>127.0.0.1:8000</C> only. The script creates a Python 3.12 venv with <C>uv</C> and installs CUDA 12.1 PyTorch.
+              The same server runs on a Windows PC, on an NVIDIA GPU or, without one, on the CPU. It needs no tunnel and no gist,
+              and binds to <C>127.0.0.1:8000</C> only. The script creates a Python 3.12 venv with <C>uv</C> and installs PyTorch;{" "}
+              <C>-Device auto</C> picks the GPU when it has enough free VRAM, otherwise the CPU when there is enough free RAM.
             </p>
             <Code>{`# from the repository root, PowerShell
-scripts\\run-local-gpu.ps1              # Qwen2-VL-2B (default, fits 8 GB cards)
-scripts\\run-local-gpu.ps1 -Model 7b    # Qwen2-VL-7B, needs about 7.5 GB free VRAM`}</Code>
+python scripts\\capability_report.py     # what this PC can run, and the best option
+scripts\\run-local-gpu.ps1              # auto: Qwen2-VL-2B on the GPU, else on the CPU
+scripts\\run-local-gpu.ps1 -Model 7b    # Qwen2-VL-7B on the GPU, needs about 7.5 GB free VRAM
+scripts\\run-local-gpu.ps1 -Device cpu  # no GPU: 2B in float32, about 10.5 GB of free RAM`}</Code>
+            <p>
+              <strong className="text-ink">On the CPU</strong> (measured on an i9-13980HX, AVX2): the 2B model in float32 needs
+              about 14 s to the first token and decodes about 5 tokens/s, so a typical answer takes 20&ndash;60 s. The answers are
+              as good as the 2B model on a GPU. int8 is faster and needs 7.1 GB but answers noticeably worse; bfloat16 is only fast
+              on CPUs with native bf16 math.
+            </p>
             <p>
               <strong className="text-ink">Trade-off:</strong> the 2B model answers about 2.5&times; faster than 7B on the T4, but
               it is clearly less accurate. In our probes it named the right symbols yet sometimes gave the wrong root cause or
@@ -185,7 +197,7 @@ scripts\\run-local-gpu.ps1 -Model 7b    # Qwen2-VL-7B, needs about 7.5 GB free V
               Windows desktop.
             </p>
             <p>
-              Then choose <strong className="text-ink">Backend &rarr; Local GPU</strong> in the client&apos;s tray menu, or start the
+              Then choose <strong className="text-ink">Backend &rarr; Local node</strong> in the client&apos;s tray menu, or start the
               client with <C>--backend local</C>. <strong className="text-ink">Auto</strong> tries Kaggle first and falls back to
               the local node.
             </p>

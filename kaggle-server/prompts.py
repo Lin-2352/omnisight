@@ -7,6 +7,7 @@ vision tokens precede the instruction, then the text.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Final
 
 from omnisight_contracts import MAX_PROMPT_CHARS, AnalysisMode
@@ -51,11 +52,31 @@ MODE_INSTRUCTIONS: Final[dict[AnalysisMode, str]] = {
 }
 
 
+#: C0/C1 controls (except tab and newline), zero-width characters and bidi overrides: invisible
+#: text that can hide instructions from the user or reorder what the model reads.
+_HIDDEN_CHARS_RE: Final[re.Pattern[str]] = re.compile(
+    "[\x00-\x08\x0b-\x1f\x7f-\x9f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]"
+)
+
+
+def sanitize_user_text(text: str) -> str:
+    """Neutralize user-supplied text (typed prompt or ASR transcript) before it enters the chat template.
+
+    Qwen tokenizers turn literal ``<|im_start|>``, ``<|im_end|>``, ``<|vision_start|>`` ... in
+    plain text into real control tokens, so a prompt could otherwise close the user turn and
+    open a forged ``system`` or ``assistant`` turn. The ``<|`` and ``|>`` delimiters are replaced
+    by look-alike angle quotes, so no control token can be spelled. Hidden and direction-override
+    characters are removed; normal text, code, tabs and newlines are unchanged.
+    """
+    cleaned = _HIDDEN_CHARS_RE.sub("", text)
+    return cleaned.replace("<|", "\u2039|").replace("|>", "|\u203a")
+
+
 def compose_user_text(mode: AnalysisMode, prompt: str, transcript: str | None) -> str:
-    """Return the text part of the user turn for ``mode``."""
+    """Return the text part of the user turn for ``mode`` (user parts sanitized)."""
     parts = [MODE_INSTRUCTIONS[mode]]
-    spoken = (transcript or "").strip()
-    typed = prompt.strip()
+    spoken = sanitize_user_text(transcript or "").strip()
+    typed = sanitize_user_text(prompt).strip()
     if spoken:
         parts.append(f"Spoken question (automatic transcription): {spoken}")
     if typed:

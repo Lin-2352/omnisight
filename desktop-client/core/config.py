@@ -107,9 +107,9 @@ def _float(env: Mapping[str, str], name: str, default: float) -> float:
 
 
 BACKENDS: Final[dict[str, str]] = {
-    "auto": "Auto (Kaggle, then local GPU)",
+    "auto": "Auto (Kaggle, then this PC)",
     "kaggle": "Kaggle cloud GPU",
-    "local": "Local GPU (this PC)",
+    "local": "Local node (this PC: GPU or CPU)",
 }
 
 
@@ -130,12 +130,14 @@ class ClientSettings:
     cache_ttl_s: float = 30.0
     connect_timeout_s: float = 3.0
     read_timeout_s: float = 60.0
+    #: Read timeout for the local node: a CPU-only node needs minutes for a long answer.
+    local_timeout_s: float = 300.0
     request_deadline_s: float = 120.0
     retries: int = 2
     max_new_tokens: int = 512
     log_level: str = "INFO"
-    #: Which inference backend to use: "auto" (Kaggle -> local GPU -> web fallback),
-    #: "kaggle" (Kaggle -> web fallback) or "local" (this PC's GPU node only).
+    #: Which inference backend to use: "auto" (Kaggle -> local node -> web fallback),
+    #: "kaggle" (Kaggle -> web fallback) or "local" (this PC's node only, GPU or CPU).
     backend: str = "auto"
 
     @classmethod
@@ -160,6 +162,7 @@ class ClientSettings:
             cache_ttl_s=_float(env, "OMNISIGHT_ENDPOINT_CACHE_TTL_S", 30.0),
             connect_timeout_s=_float(env, "OMNISIGHT_CONNECT_TIMEOUT_S", 3.0),
             read_timeout_s=_float(env, "OMNISIGHT_REQUEST_TIMEOUT_S", 60.0),
+            local_timeout_s=_float(env, "OMNISIGHT_LOCAL_TIMEOUT_S", 300.0),
             request_deadline_s=_float(env, "OMNISIGHT_REQUEST_DEADLINE_S", 120.0),
             max_new_tokens=max_new_tokens,
             log_level=(_first(env, "OMNISIGHT_LOG_LEVEL") or "INFO").upper(),
@@ -171,8 +174,9 @@ class ClientSettings:
         return replace(self, backend=_backend(backend))
 
     def with_local_url(self, url: str) -> ClientSettings:
-        """Copy with a different local GPU node URL."""
-        return replace(self, local_dev_url=_url_or_none("local node URL", url.strip()) or LOCAL_DEV_URL)
+        """Copy with a different local node URL (GPU or CPU); an empty value restores the default."""
+        cleaned = url.strip()
+        return replace(self, local_dev_url=_url_or_none("local node URL", cleaned) if cleaned else LOCAL_DEV_URL)
 
     def with_override(self, url: str | None) -> ClientSettings:
         """Copy with a session override URL (empty or None clears it)."""
@@ -272,8 +276,10 @@ class EndpointResolver:
             record = self._record
         elif response.status_code == 200:
             try:
-                files = response.json().get("files", {})
-                content = files[GIST_FILENAME]["content"]
+                document = response.json()
+                if not isinstance(document, dict):
+                    raise TypeError(f"gist API returned a {type(document).__name__}, not an object")
+                content = document.get("files", {})[GIST_FILENAME]["content"]
                 record = EndpointRecord.model_validate_json(content)
             except (KeyError, TypeError, ValueError, ValidationError) as exc:
                 logger.warning("gist has no valid %s: %s", GIST_FILENAME, exc)
@@ -288,7 +294,12 @@ class EndpointResolver:
         age = record.age_seconds()
         if record.is_stale(STALE_AFTER_S):
             detail = f"node {record.status}, record {age:.0f} s old"
-            logger.info("gist endpoint unusable (%s); using fallback", detail)
+            if record.status == "offline":
+                # Normal: the node published "offline" when it stopped.
+                logger.info("gist endpoint unusable (%s); using fallback", detail)
+            else:
+                # The node stopped heartbeating without saying so (killed kernel, lost tunnel).
+                logger.warning("gist record is stale (%s): the node stopped heartbeating; using fallback", detail)
             return self._fallback(settings, detail, record)
         return EndpointResolution(
             url=record.base_url,

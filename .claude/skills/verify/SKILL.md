@@ -34,7 +34,18 @@ The surface is the public HTTPS API of the node running on Kaggle. This dev box 
    - For a whole speed report: `python kaggle-server/benchmark.py --mode http --url <url> --runs 3`
 5. **Stop.** Click **Cancel Run** (the button shows as "Stop execution"). The gist should flip to `offline` within seconds, and the tunnel should return HTTP 530. Then click **Stop session** so it stops using the 30 h/week GPU quota.
 
+## Automated suites (run these first; see tests/README.md)
+- **Deterministic CI suite** (about 17 s, no network): `.venv\Scripts\python -m pytest -v --cov`. Expected: 367 passed, 2 skipped, coverage at least 85% (currently 95%). The 2 skips are the torch-only hardware modules.
+- **Real GPU** (RTX 4060): `.venv-gpu\Scripts\python -m pytest -m "gpu or model" -s tests/hardware/test_local_gpu.py`. It covers a real CUDA OOM → 507, then the 2B model, Whisper, and tokenizer-level injection.
+- **Real CPU** (needs 10.5 GB of free RAM): `.venv-gpu\Scripts\python -m pytest -m cpu_inference -s tests/hardware/test_local_cpu.py`.
+- **This PC's capability:** `python scripts/capability_report.py`, or `pytest -m hardware -s tests/hardware/test_capability.py`.
+- **Production site:** `pytest -m network -s tests/live`. It spends at most two Gemini calls.
+- **Web:** in `web-showcase/`, run `npm run ci` (type drift, typecheck, lint, build, Vitest, e2e).
+- **Local nodes end to end:** start `scripts\run-local-gpu.ps1 [-Device cpu|cuda]`, then drive `network.client.InferenceClient` with `backend="local"`, with no GUI. Stop the node by killing the process on port 8000.
+
 ## Gotchas
+- **CPU inference data types:** use float32. bfloat16 is unusably slow on AVX2-only CPUs (over 2.5 min for 64 tokens), and int8 answers noticeably worse. A float32 CPU answer takes 20–60 s, so the local tier's read timeout is 300 s.
+- **Benchmark output needs `python -u` and `grep --line-buffered`.** Without them the log stays empty until the process exits, and a slow run looks hung.
 - **Cell outputs are unreadable from here.** They render in a cross-origin Jupyter iframe. Read results from the gist or the HTTP API, or scroll and take screenshots.
 - **Typing into a new cell can trigger shortcuts.** In Jupyter command mode, typed letters run shortcuts (`m` makes a cell Markdown, `x` cuts it). Select the cell, press `y` to make it code, press Enter for edit mode, and only then type.
 - **One node per GPU.** Only one model instance fits on each T4. `diagnose_vision.py` uses `--device 0/1` to run two variants side by side.

@@ -9,9 +9,9 @@ The GPU inference node. It runs in a Kaggle notebook (GPU T4 or P100) and serves
 | `omnisight_kaggle.ipynb` | Kaggle launcher: clone, install, export secrets, optional benchmark, run | no (runs a subprocess) |
 | `launch.py` | Starts keep-alive, uvicorn, background model load, tunnel and gist publishing; handles graceful shutdown | only through `engine` |
 | `server.py` | `create_app(engine, settings)`: `/v1/health`, `/v1/analyze`, body limit, CORS, auth, error mapping | **no** |
-| `engine.py` | `QwenVisionEngine`: NF4 load, VRAM ceiling, generation, TTFT, confidence, OOM → 507, Whisper | yes |
+| `engine.py` | `QwenVisionEngine`: NF4 on CUDA or unquantized on the CPU, VRAM ceiling / RAM preflight, generation, TTFT, confidence, OOM → 507, Whisper | yes |
 | `engine_api.py` | Engine protocol and typed errors mapped to HTTP statuses | no |
-| `prompts.py` | System prompt and per-mode instructions | no |
+| `prompts.py` | System prompt, per-mode instructions, and `sanitize_user_text` (neutralizes chat-template control tokens in prompts and transcripts) | no |
 | `media.py` | Image decoding with a size check; WAV decode and 16 kHz resample (numpy only) | no |
 | `tunnel_manager.py` | cloudflared supervisor, URL regex, `GistPublisher` with backoff and jitter | no |
 | `keep_alive.py` | Anti-idle daemon thread (GPU matmul when idle, else numpy) | optional |
@@ -19,6 +19,8 @@ The GPU inference node. It runs in a Kaggle notebook (GPU T4 or P100) and serves
 | `node_config.py` | `ServerSettings` from env vars and Kaggle Secrets | no |
 | `diagnose_vision.py` | Loads one quantization variant and checks that OCR and debug answers contain on-screen text | yes |
 | `requirements-kaggle.txt` | Pinned stack for Kaggle Linux (Python 3.10–3.12) | – |
+| `requirements-local-gpu.txt` | Pinned Windows stack for `scripts\run-local-gpu.ps1` (CUDA 12.1 wheels; also runs on the CPU) | – |
+| `requirements-local-gpu-test.txt` | pytest tools for the hardware suites in `.venv-gpu` | – |
 
 ## Run on Kaggle
 1. Create a notebook from `omnisight_kaggle.ipynb`.
@@ -81,8 +83,34 @@ The GPU inference node. It runs in a Kaggle notebook (GPU T4 or P100) and serves
 | 507 | `gpu_oom` | CUDA OOM under the 11 GB ceiling. The cache is cleared, and `details` carries the VRAM figures |
 | 500 | `internal_error` | Model failed to load, or an unexpected error |
 
+## Run on this PC (GPU or CPU)
+
+`scripts\run-local-gpu.ps1` serves the same node on `127.0.0.1:8000`. It opens no tunnel and publishes nothing to the gist.
+
+- **`-Device auto`** (the default) asks `scripts\capability_report.py`: the GPU when it has enough free VRAM, otherwise the CPU when there is enough free RAM.
+- **`-Device cpu`** loads Qwen2-VL-2B unquantized, because bitsandbytes 4-bit kernels need CUDA.
+- **CPU settings:**
+  - `OMNISIGHT_CPU_DTYPE`, `OMNISIGHT_CPU_THREADS` and `OMNISIGHT_CPU_MAX_NEW_TOKENS` (default 256).
+  - The pixel budget drops to 896×504.
+  - The engine refuses to start without enough free RAM and says why.
+- **CPU health reporting:** `gpu_available: false`, the CPU's name in `gpu_name`, the weight format in `quantization`, and RAM figures in `warnings`.
+
+Measured on an i9-13980HX (24 cores, AVX2, no AVX-512) with 2B, the traceback sample, and 64 new tokens:
+
+| Weights | Load | First token | Decode | RAM peak | Answer quality |
+| --- | --- | --- | --- | --- | --- |
+| float32 (default) | 9 s | 14.0–14.6 s | 5.0–5.3 tok/s | 10.5 GB | OCR and debug both found `discount_rate` |
+| int8 (dynamic, language model) | 34 s | 12.1–12.2 s | 8.2–8.4 tok/s | 7.1 GB | OCR explained instead of transcribing; debug missed the key |
+| bfloat16 | 10 s | not finished after 2.5 min | – | – | unusable without native bf16 math |
+
+On the RTX 4060 Laptop GPU, the same 2B model in NF4 runs at 1.5 s to the first token and 37 tok/s, with a 3.2 GB VRAM peak. Use the CPU node for private or offline use when there is no suitable GPU.
+
 ## Security notes
 - uvicorn binds to `127.0.0.1`, so the tunnel is the only way in.
 - With no API key, the endpoint is public, and the request queue limit is the only abuse control.
 - With a key set, browsers can't call the node directly, because the key would be exposed. The web app must proxy through a server route.
 - CORS never allows credentials.
+- User text (the typed prompt and the ASR transcript) is sanitized before it reaches the chat template.
+  - `<|`/`|>` become look-alike quotes, so a prompt cannot close its turn and forge a `system` or `assistant` turn.
+  - Control, zero-width and bidi-override characters are removed.
+  - `tests/hardware/test_local_gpu.py` checks this against the real Qwen tokenizer.

@@ -15,8 +15,9 @@
     "typecheck": "tsc --noEmit",
     "gen:types": "node scripts/gen-types.mjs",
     "check:types": "node scripts/gen-types.mjs --check",
-    "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON tests/test_api_failover.ts",
-    "ci": "npm run check:types && npm run typecheck && npm run lint && npm run build && npm test"
+    "test": "vitest run",
+    "ci": "npm run check:types && npm run typecheck && npm run lint && npm run build && npm test && npm run test:e2e",
+    "test:e2e": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON tests/test_api_failover.ts"
   },
   "dependencies": {
     "clsx": "2.1.1",
@@ -37,6 +38,7 @@
     "json-schema-to-typescript": "16.0.0",
     "postcss": "8.5.28",
     "tailwindcss": "3.4.19",
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "vitest": "5.0.2"
   }
 }

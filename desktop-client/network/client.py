@@ -8,13 +8,18 @@ Failover order for every request:
 Per tier:
     * connect timeout 3 s, read timeout 60 s (a 512-token answer takes ~40 s
       on a T4);
-    * up to 2 retries with full-jitter exponential backoff for transient
-      failures (connection errors, 502/504, 429 honouring ``Retry-After``);
-    * immediate failover on a dead or unusable node (503 loading, 507 GPU OOM,
-      530 Cloudflare origin down, read timeout);
+    * immediate failover (no back-off) on a dead or unusable node: 502/504
+      gateway errors, 503 loading, 507 GPU OOM, 521-524/530 Cloudflare origin
+      errors, connect timeout, refused connection, DNS failure, read timeout;
+    * up to 2 retries with full-jitter exponential back-off only for transient
+      failures: a connection dropped mid-request, 429 (honouring
+      ``Retry-After``), 500 and other 5xx;
     * no failover on client errors (400/401/404/405/413/422): the request
       itself is wrong, so the error is shown instead.
-The whole request is bounded by a 120 s deadline.
+A circuit breaker remembers tiers that just failed and skips them for 30 s, so
+the next request goes straight to a working tier instead of waiting out another
+timeout. The last tier is always attempted. The whole request is bounded by a
+120 s deadline.
 """
 
 from __future__ import annotations
@@ -53,8 +58,13 @@ from network.schemas import (
 
 logger = get_logger("network")
 
-FAILOVER_NOW: Final[frozenset[int]] = frozenset({503, 507, 530})
-RETRY_THEN_FAILOVER: Final[frozenset[int]] = frozenset({500, 502, 504, 520, 521, 522, 523, 524})
+#: A dead or unusable node: go to the next tier at once (retrying only adds latency).
+#: 502/504 from the Cloudflare edge mean the origin behind the tunnel is gone or hung.
+FAILOVER_NOW: Final[frozenset[int]] = frozenset({502, 503, 504, 507, 521, 522, 523, 524, 530})
+#: Transient: retry with jittered back-off, then fail over (any other 5xx is treated the same).
+RETRY_THEN_FAILOVER: Final[frozenset[int]] = frozenset({429, 500, 520})
+#: How long a tier that just failed is skipped before it gets another chance.
+BREAKER_COOLDOWN_S: Final[float] = 30.0
 CLIENT_ERRORS: Final[frozenset[int]] = frozenset({400, 401, 403, 404, 405, 413, 422})
 BACKOFF_BASE_S: Final[float] = 0.5
 BACKOFF_CAP_S: Final[float] = 8.0
@@ -110,6 +120,50 @@ class CancelledError(InferenceError):
 class TierTarget:
     tier: Tier
     url: str  # full analyze URL
+
+
+class CircuitBreaker:
+    """Per-endpoint breaker: ``closed`` -> (failure) ``open`` for the cooldown -> ``half_open``.
+
+    While open the endpoint is skipped, so a dead Kaggle tunnel costs one timeout
+    per cooldown instead of one per request. After the cooldown one request may try
+    it again (half-open): success closes the circuit, failure re-opens it.
+    Thread-safe; one instance is shared by every worker in the process.
+    """
+
+    def __init__(self, cooldown_s: float = BREAKER_COOLDOWN_S, clock: Callable[[], float] = time.monotonic) -> None:
+        if cooldown_s <= 0:
+            raise ValueError("cooldown_s must be positive")
+        self.cooldown_s = cooldown_s
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._opened_at: dict[str, float] = {}
+
+    def state(self, url: str) -> str:
+        with self._lock:
+            opened = self._opened_at.get(url)
+            if opened is None:
+                return "closed"
+            return "open" if self._clock() - opened < self.cooldown_s else "half_open"
+
+    def allow(self, url: str) -> bool:
+        return self.state(url) != "open"
+
+    def record_failure(self, url: str) -> None:
+        with self._lock:
+            self._opened_at[url] = self._clock()
+
+    def record_success(self, url: str) -> None:
+        with self._lock:
+            self._opened_at.pop(url, None)
+
+    def reset(self) -> None:
+        with self._lock:
+            self._opened_at.clear()
+
+
+#: Shared by every ``InferenceClient`` that is not given its own breaker.
+DEFAULT_BREAKER: Final[CircuitBreaker] = CircuitBreaker()
 
 
 def build_request(
@@ -174,19 +228,21 @@ class InferenceClient:
         session: requests.Session | None = None,
         sleep: Callable[[float], None] = time.sleep,
         rng: random.Random | None = None,
+        breaker: CircuitBreaker | None = None,
     ) -> None:
         self.settings = settings
         self.resolver = resolver
         self._session = session or requests.Session()
         self._sleep = sleep
         self._rng = rng or random.Random()
+        self.breaker = breaker or DEFAULT_BREAKER
 
     def tiers(self) -> list[TierTarget]:
         """Endpoints to try, in order, for the configured backend.
 
-        auto   : Kaggle (or override) -> local GPU node -> web fallback
+        auto   : Kaggle (or override) -> local node (GPU or CPU) -> web fallback
         kaggle : Kaggle (or override) -> web fallback
-        local  : local GPU node only
+        local  : this PC's node only (GPU or CPU)
         """
         backend = self.settings.backend
         targets: list[TierTarget] = []
@@ -220,23 +276,36 @@ class InferenceClient:
         on_tier: Callable[[str], None] | None = None,
         cancelled: Callable[[], bool] = lambda: False,
     ) -> ClientResult:
-        deadline = time.monotonic() + self.settings.request_deadline_s
         body = request.model_dump_json().encode("utf-8")
         failures: list[str] = []
-        for target in self.tiers():
+        targets = self.tiers()
+        budget_s = self.settings.request_deadline_s
+        if any(target.tier == "local" for target in targets):
+            # A CPU-only local node may legitimately take minutes; never cut it off early.
+            budget_s = max(budget_s, self.settings.local_timeout_s + self.settings.connect_timeout_s + 5.0)
+        deadline = time.monotonic() + budget_s
+        for index, target in enumerate(targets):
             if cancelled():
                 raise CancelledError("request cancelled")
+            is_last = index == len(targets) - 1
+            if not is_last and not self.breaker.allow(target.url):
+                # Failed moments ago: skip it now instead of waiting out another timeout.
+                failures.append(f"{target.tier}: skipped (failed within the last {self.breaker.cooldown_s:.0f} s)")
+                logger.info("%s tier skipped: circuit open for %s", target.tier, target.url)
+                continue
             if on_tier is not None:
                 on_tier(target.tier)
             logger.info("trying %s tier: %s", target.tier, target.url)
             try:
                 response, network_ms, attempts = self._post_with_retries(target, body, deadline, cancelled)
             except _FailoverError as exc:
+                self.breaker.record_failure(target.url)
                 failures.append(f"{target.tier}: {exc}")
                 logger.warning("%s tier failed: %s", target.tier, exc)
                 if target.tier == "kaggle":
                     self.resolver.invalidate()
                 continue
+            self.breaker.record_success(target.url)
             timings = response.timings
             metrics = LatencyMetrics(
                 network_ms=round(network_ms, 1),
@@ -252,8 +321,9 @@ class InferenceClient:
             return ClientResult(response=response, metrics=metrics)
         if self.settings.backend == "local" and not failures:
             raise InferenceError(
-                f"Local GPU node not running at {self.settings.local_dev_url} - start it with "
-                "scripts\\run-local-gpu.ps1 (or switch the backend to Kaggle in the tray menu)."
+                f"Local node not running at {self.settings.local_dev_url} - start it with "
+                "scripts\\run-local-gpu.ps1 (add -Device cpu if this PC has no NVIDIA GPU), "
+                "or switch the backend to Kaggle in the tray menu."
             )
         if self.settings.backend == "kaggle" and not failures:
             raise InferenceError("The Kaggle node is offline and no web fallback is configured.")
@@ -275,6 +345,7 @@ class InferenceClient:
             remaining = deadline - time.monotonic()
             if remaining <= 1.0:
                 raise InferenceError(f"request deadline of {self.settings.request_deadline_s:.0f} s exceeded")
+            read_timeout = self.settings.local_timeout_s if target.tier == "local" else self.settings.read_timeout_s
             attempts += 1
             started = time.perf_counter()
             try:
@@ -282,14 +353,17 @@ class InferenceClient:
                     target.url,
                     data=body,
                     headers={"Content-Type": "application/json", "Accept": "application/json"},
-                    timeout=(self.settings.connect_timeout_s, min(self.settings.read_timeout_s, remaining)),
+                    timeout=(self.settings.connect_timeout_s, min(read_timeout, remaining)),
                 )
             except requests.ReadTimeout as exc:
-                raise _FailoverError(f"no answer within {self.settings.read_timeout_s:.0f} s") from exc
-            except (requests.ConnectionError, requests.ConnectTimeout) as exc:
+                raise _FailoverError(f"no answer within {read_timeout:.0f} s") from exc
+            except requests.ConnectTimeout as exc:
+                raise _FailoverError(f"no connection within {self.settings.connect_timeout_s:.0f} s") from exc
+            except requests.ConnectionError as exc:
                 if _refused(exc):
                     raise _FailoverError("connection refused or host not found") from exc
-                last_problem = f"connection failed ({type(exc).__name__})"
+                # Dropped mid-request (reset, remote disconnect): transient, worth a retry.
+                last_problem = f"connection dropped ({type(exc).__name__})"
                 floor = None
             except requests.RequestException as exc:
                 raise _FailoverError(f"request error: {exc}") from exc
@@ -306,7 +380,7 @@ class InferenceClient:
                     raise InferenceError(f"{target.tier} rejected the request: {message}", status=status, error_code=code)
                 if status in FAILOVER_NOW:
                     raise _FailoverError(f"HTTP {status}: {message}")
-                if status == 429 or status in RETRY_THEN_FAILOVER or status >= 500:
+                if status in RETRY_THEN_FAILOVER or status >= 500:
                     last_problem = f"HTTP {status}: {message}"
                     floor = _retry_after(response)
                 else:
@@ -341,12 +415,15 @@ class InferenceWorker(QThread):
         request: AnalyzeRequest,
         base_metrics: LatencyMetrics | None = None,
         parent: QThread | None = None,
+        *,
+        breaker: CircuitBreaker | None = None,
     ) -> None:
         super().__init__(parent)
         self._settings = settings
         self._resolver = resolver
         self._request = request
         self._base_metrics = base_metrics or LatencyMetrics()
+        self._breaker = breaker
         self._cancel = threading.Event()
         self.setObjectName("omnisight-inference")
 
@@ -355,7 +432,7 @@ class InferenceWorker(QThread):
         self.requestInterruption()
 
     def run(self) -> None:
-        client = InferenceClient(self._settings, self._resolver)
+        client = InferenceClient(self._settings, self._resolver, breaker=self._breaker)
         try:
             result = client.analyze(
                 self._request,

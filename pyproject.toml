@@ -34,10 +34,18 @@ omnisight_contracts = ["py.typed"]
 minversion = "8.0"
 testpaths = ["tests"]
 pythonpath = ["shared", "desktop-client", "kaggle-server"]
-addopts = "-ra --strict-markers"
+# The default selection is the deterministic CI suite. Opt into the others explicitly,
+# e.g. `pytest -m gpu tests/hardware` (in .venv-gpu) or `pytest -m network tests/live`.
+addopts = "-ra --strict-markers -m \"not gpu and not model and not cpu_inference and not network and not display and not hardware\""
+timeout = 60
 markers = [
-    "gpu: requires a CUDA device (skipped on the Windows dev box)",
-    "network: performs real network I/O",
+    "gpu: requires a CUDA device and torch (run in .venv-gpu)",
+    "model: loads real Hugging Face model weights (slow, needs the HF cache)",
+    "cpu_inference: runs a real model on the CPU (slow, needs ~9 GB free RAM)",
+    "hardware: probes this machine's real CPU/RAM/GPU",
+    "display: needs a real, lit, unlocked screen",
+    "network: performs real network I/O against live services",
+    "slow: takes longer than a few seconds",
 ]
 
 [tool.ruff]

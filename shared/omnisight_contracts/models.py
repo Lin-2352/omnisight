@@ -219,8 +219,9 @@ class ImagePayload(_RequestModel):
 
     mime: ImageMime
     data_b64: str = Field(description="Standard base64 (RFC 4648) without a data-URL prefix.")
-    width: int = Field(ge=1, le=MAX_IMAGE_DIMENSION)
-    height: int = Field(ge=1, le=MAX_IMAGE_DIMENSION)
+    # strict: JSON numbers only - no "64" strings, 64.0 floats or booleans.
+    width: int = Field(ge=1, le=MAX_IMAGE_DIMENSION, strict=True)
+    height: int = Field(ge=1, le=MAX_IMAGE_DIMENSION, strict=True)
 
     @model_validator(mode="before")
     @classmethod
@@ -261,8 +262,8 @@ class AudioPayload(_RequestModel):
 
     mime: AudioMime = "audio/wav"
     data_b64: str
-    sample_rate: int = Field(ge=8000, le=48000)
-    duration_ms: int = Field(ge=1, le=MAX_AUDIO_DURATION_MS)
+    sample_rate: int = Field(ge=8000, le=48000, strict=True)
+    duration_ms: int = Field(ge=1, le=MAX_AUDIO_DURATION_MS, strict=True)
 
     @model_validator(mode="before")
     @classmethod
@@ -296,11 +297,12 @@ class AnalyzeRequest(_RequestModel):
     prompt: Annotated[str, StringConstraints(strip_whitespace=True, max_length=MAX_PROMPT_CHARS)] = (
         ""
     )
-    max_new_tokens: int = Field(default=MAX_NEW_TOKENS, ge=16, le=MAX_NEW_TOKENS)
+    max_new_tokens: int = Field(default=MAX_NEW_TOKENS, ge=16, le=MAX_NEW_TOKENS, strict=True)
     temperature: float = Field(
         default=DEFAULT_TEMPERATURE,
         ge=0.0,
         le=1.5,
+        strict=True,
         description="Sampling temperature; 0 selects greedy decoding.",
     )
     client: ClientInfo | None = None

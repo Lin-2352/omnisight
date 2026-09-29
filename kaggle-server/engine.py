@@ -1,8 +1,13 @@
-"""Qwen2-VL-7B (NF4) + Whisper inference engine. The only module that imports torch.
+"""Qwen2-VL (NF4 on a GPU, or unquantized on the CPU) + Whisper engine. The only module that imports torch.
 
-Memory accounting uses ``torch.cuda.memory_allocated`` in decimal units
+Devices: on CUDA the model is loaded in 4-bit NF4 with a VRAM ceiling. With
+``OMNISIGHT_DEVICE=cpu`` (or ``auto`` on a machine without a usable GPU) it runs on the
+CPU in bfloat16/float32 (or dynamically quantized int8), with no GPU needed but much slower.
+
+Memory accounting on CUDA uses ``torch.cuda.memory_allocated`` in decimal units
 (1 GB = 10**9 bytes). nvidia-smi reports more because it also counts the CUDA
-context and the caching allocator's reserve.
+context and the caching allocator's reserve. On the CPU the figures are the
+process's resident memory (RSS), reported in health warnings rather than VRAM fields.
 
 TTFT definition: the clock starts once the GPU lock is held, before image
 decoding and preprocessing, and stops when the first new token has been
@@ -65,6 +70,11 @@ from prompts import WARMUP_MESSAGES, build_messages
 logger = logging.getLogger("omnisight.engine")
 
 MIN_COMPUTE_CAPABILITY: Final[tuple[int, int]] = (6, 0)
+#: Free RAM needed to run 2B on the CPU (weights + activations + Whisper), decimal MB.
+#: Measured process peaks: float32 10.5 GB, int8 7.1 GB (quantized from float32 at load).
+CPU_RAM_NEEDED_MB: Final[dict[str, int]] = {"float32": 10_500, "bfloat16": 5_500, "int8": 7_500}
+CPU_DTYPES: Final[dict[str, torch.dtype]] = {"float32": torch.float32, "bfloat16": torch.bfloat16, "int8": torch.float32}
+HEALTH_QUANTIZATION: Final[dict[str, str]] = {"float32": "none", "bfloat16": "bf16", "int8": "int8"}
 OOM_DEGRADED_WINDOW_S: Final[float] = 60.0
 ASR_MAX_NEW_TOKENS: Final[int] = 220
 
@@ -77,15 +87,58 @@ def describe_gpu(device_index: int = 0) -> str:
     return f"{props.name} {round(props.total_memory / GB)}GB"
 
 
+def resolve_device(settings: ServerSettings, device_index: int = 0) -> torch.device:
+    """``cuda:<index>`` or ``cpu`` from ``settings.device`` (``auto`` prefers CUDA)."""
+    if settings.device == "cpu" or (settings.device == "auto" and not torch.cuda.is_available()):
+        return torch.device("cpu")
+    return torch.device(f"cuda:{device_index}")
+
+
+def cpu_name() -> str:
+    """Marketing name of the CPU (registry on Windows, /proc/cpuinfo on Linux)."""
+    import platform
+
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0") as key:
+            return str(winreg.QueryValueEx(key, "ProcessorNameString")[0]).strip()
+    except (ImportError, OSError):
+        pass
+    try:
+        with open("/proc/cpuinfo", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("model name"):
+                    return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return platform.processor() or "CPU"
+
+
+def describe_device(settings: ServerSettings, device_index: int = 0) -> str:
+    """Label for the gist/health: the GPU (``"Tesla T4 16GB"``) or ``"<cpu name> (CPU)"``."""
+    if resolve_device(settings, device_index).type == "cpu":
+        return f"{cpu_name()} (CPU)"[:128]
+    return describe_gpu(device_index)
+
+
+def _rss_bytes() -> int:
+    import psutil
+
+    return int(psutil.Process().memory_info().rss)
+
+
 class FirstTokenTimer(StoppingCriteria):
     """Records when the first new token has been sampled; never stops generation."""
 
-    def __init__(self) -> None:
+    def __init__(self, cuda_sync: bool = True) -> None:
         self.first_token_at: float | None = None
+        self._cuda_sync = cuda_sync
 
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs: Any) -> torch.BoolTensor:
         if self.first_token_at is None:
-            torch.cuda.synchronize()
+            if self._cuda_sync:
+                torch.cuda.synchronize()
             self.first_token_at = time.perf_counter()
         return torch.zeros(input_ids.shape[0], dtype=torch.bool, device=input_ids.device)
 
@@ -102,13 +155,15 @@ class GenerationOutcome:
 
 
 class QwenVisionEngine:
-    """Serves Qwen2-VL-7B-Instruct in 4-bit NF4 on a single CUDA device."""
+    """Serves Qwen2-VL in 4-bit NF4 on one CUDA device, or unquantized on the CPU."""
 
     def __init__(self, settings: ServerSettings, device_index: int = 0) -> None:
         self.settings = settings
         self.gpu_lock = threading.Lock()
         self._device_index = device_index
-        self._device = torch.device(f"cuda:{device_index}")
+        self._device = resolve_device(settings, device_index)
+        self._on_cpu = self._device.type == "cpu"
+        self._peak_rss = 0
         self._state: EngineState = "idle"
         self._state_lock = threading.Lock()
         self._asr_lock = threading.Lock()
@@ -149,23 +204,29 @@ class QwenVisionEngine:
         self._set_state("loading")
         started = time.perf_counter()
         try:
-            self._check_hardware()
-            self._apply_memory_ceiling()
-            self._load_model()
-            torch.cuda.synchronize(self._device)
-            self._baseline_bytes = torch.cuda.memory_allocated(self._device_index)
-            budget = self.settings.baseline_budget_bytes
-            verdict = "within" if self._baseline_bytes <= budget else "OVER"
-            logger.info(
-                "model resident: %.0f MB allocated (%s the %.0f MB baseline budget)",
-                self._baseline_bytes / MB,
-                verdict,
-                budget / MB,
-            )
+            if self._on_cpu:
+                rss_before = self._check_cpu()
+                self._load_model()
+                self._baseline_bytes = max(0, _rss_bytes() - rss_before)
+                logger.info("model resident on the CPU: %.0f MB of process memory", self._baseline_bytes / MB)
+            else:
+                self._check_hardware()
+                self._apply_memory_ceiling()
+                self._load_model()
+                torch.cuda.synchronize(self._device)
+                self._baseline_bytes = torch.cuda.memory_allocated(self._device_index)
+                budget = self.settings.baseline_budget_bytes
+                verdict = "within" if self._baseline_bytes <= budget else "OVER"
+                logger.info(
+                    "model resident: %.0f MB allocated (%s the %.0f MB baseline budget)",
+                    self._baseline_bytes / MB,
+                    verdict,
+                    budget / MB,
+                )
             if self.settings.asr_preload:
                 self._ensure_asr()
             self._warmup()
-            torch.cuda.reset_peak_memory_stats(self._device_index)
+            self.reset_peak_memory()
             self._set_state("ready")
             logger.info("engine ready in %.1f s", time.perf_counter() - started)
         except Exception as exc:
@@ -173,6 +234,31 @@ class QwenVisionEngine:
             self._set_state("failed")
             logger.exception("engine failed to load")
             raise
+
+    def _check_cpu(self) -> int:
+        """Refuse to start without enough free RAM; set the thread count. Returns RSS before loading."""
+        import psutil
+
+        needed = CPU_RAM_NEEDED_MB[self.settings.cpu_dtype]
+        available = psutil.virtual_memory().available / MB
+        if available < needed:
+            raise UnsupportedHardwareError(
+                f"running {self.settings.model_id} on the CPU in {self.settings.cpu_dtype} needs about "
+                f"{needed} MB of free RAM, but only {available:.0f} MB is available; close other apps, "
+                "use OMNISIGHT_CPU_DTYPE=bfloat16, or use the Kaggle backend"
+            )
+        if self.settings.cpu_threads:
+            torch.set_num_threads(self.settings.cpu_threads)
+        self._gpu_name = cpu_name()
+        logger.info(
+            "CPU mode: %s, %d torch threads, %s weights, %.0f MB RAM free (%d MB needed)",
+            self._gpu_name,
+            torch.get_num_threads(),
+            self.settings.cpu_dtype,
+            available,
+            needed,
+        )
+        return _rss_bytes()
 
     def _check_hardware(self) -> None:
         if not torch.cuda.is_available():
@@ -235,6 +321,9 @@ class QwenVisionEngine:
         )
 
     def _load_model(self) -> None:
+        if self._on_cpu:
+            self._load_model_cpu()
+            return
         token = self.settings.hf_token.get_secret_value() if self.settings.hf_token else None
         quantization = BitsAndBytesConfig(
             load_in_4bit=True,
@@ -262,6 +351,34 @@ class QwenVisionEngine:
         )
         model.eval()
         self._fix_vision_input_dtype(model)
+        self._finish_model(model)
+
+    def _load_model_cpu(self) -> None:
+        """Unquantized weights on the CPU (bitsandbytes 4-bit kernels need CUDA)."""
+        token = self.settings.hf_token.get_secret_value() if self.settings.hf_token else None
+        dtype_name = self.settings.cpu_dtype
+        logger.info("loading processor for %s", self.settings.model_id)
+        self._processor = AutoProcessor.from_pretrained(
+            self.settings.model_id,
+            min_pixels=self.settings.min_pixels,
+            max_pixels=self.settings.max_pixels,
+            token=token,
+        )
+        logger.info("loading %s on the CPU (%s)", self.settings.model_id, dtype_name)
+        model = Qwen2VLForConditionalGeneration.from_pretrained(
+            self.settings.model_id,
+            torch_dtype=CPU_DTYPES[dtype_name],
+            attn_implementation="sdpa",
+            low_cpu_mem_usage=True,
+            token=token,
+        )
+        model.eval()
+        if dtype_name == "int8":
+            # Dynamic int8 for the language model's linear layers; the vision tower stays float32.
+            model.model = torch.ao.quantization.quantize_dynamic(model.model, {torch.nn.Linear}, dtype=torch.qint8)
+        self._finish_model(model)
+
+    def _finish_model(self, model: Qwen2VLForConditionalGeneration) -> None:
         generation_config = model.generation_config
         eos = generation_config.eos_token_id
         eos_ids = [eos] if isinstance(eos, int) else list(eos or [])
@@ -305,16 +422,16 @@ class QwenVisionEngine:
             if self._asr_model is not None:
                 return
             token = self.settings.hf_token.get_secret_value() if self.settings.hf_token else None
-            before = torch.cuda.memory_allocated(self._device_index)
-            logger.info("loading ASR model %s (fp16)", self.settings.asr_model_id)
+            before = self._allocated_bytes()
+            logger.info("loading ASR model %s (%s)", self.settings.asr_model_id, "fp32" if self._on_cpu else "fp16")
             processor = WhisperProcessor.from_pretrained(self.settings.asr_model_id, token=token)
             model = WhisperForConditionalGeneration.from_pretrained(
-                self.settings.asr_model_id, torch_dtype=torch.float16, token=token
+                self.settings.asr_model_id, torch_dtype=self._asr_dtype, token=token
             ).to(self._device)
             model.eval()
             self._asr_processor = processor
             self._asr_model = model
-            self._asr_bytes = torch.cuda.memory_allocated(self._device_index) - before
+            self._asr_bytes = max(0, self._allocated_bytes() - before)
             logger.info("ASR resident: %.0f MB (not counted in the model baseline)", self._asr_bytes / MB)
 
     def _warmup(self) -> None:
@@ -327,7 +444,7 @@ class QwenVisionEngine:
             with torch.inference_mode():
                 self._model.generate(**inputs, max_new_tokens=4, do_sample=False, pad_token_id=self._pad_id)
             del inputs
-        torch.cuda.empty_cache()
+        self._empty_cache()
 
     # ---------------------------------------------------------------- analyze
 
@@ -352,7 +469,7 @@ class QwenVisionEngine:
                     transcript = self._transcribe(request.audio)
                 outcome = self._generate(request, image, transcript)
                 input_tokens = outcome.input_tokens
-            except torch.cuda.OutOfMemoryError:
+            except (torch.cuda.OutOfMemoryError, MemoryError):
                 oom = True
             if oom:
                 # Outside the except block: the traceback (and the tensors its frames
@@ -368,7 +485,7 @@ class QwenVisionEngine:
         assert self._asr_processor is not None and self._asr_model is not None
         features = self._asr_processor(
             samples, sampling_rate=ASR_SAMPLE_RATE, return_tensors="pt"
-        ).input_features.to(self._device, dtype=torch.float16)
+        ).input_features.to(self._device, dtype=self._asr_dtype)
         with torch.inference_mode():
             ids = self._asr_model.generate(features, task="transcribe", max_new_tokens=ASR_MAX_NEW_TOKENS)
         text = self._asr_processor.batch_decode(ids, skip_special_tokens=True)[0].strip()
@@ -384,7 +501,9 @@ class QwenVisionEngine:
         inputs = self._processor(text=[text], images=[image], return_tensors="pt").to(self._device)
         prompt_length = int(inputs["input_ids"].shape[1])
         max_new_tokens = min(request.max_new_tokens, MAX_NEW_TOKENS)
-        timer = FirstTokenTimer()
+        if self._on_cpu:
+            max_new_tokens = min(max_new_tokens, self.settings.cpu_max_new_tokens)
+        timer = FirstTokenTimer(cuda_sync=not self._on_cpu)
         do_sample = request.temperature > 0
         sampling: dict[str, Any] = (
             {"do_sample": True, "temperature": request.temperature, "top_p": 1.0, "top_k": 0}
@@ -405,8 +524,10 @@ class QwenVisionEngine:
                 eos_token_id=sorted(self._eos_ids),
                 **sampling,
             )
-        torch.cuda.synchronize(self._device)
+        self._synchronize()
         finished_at = time.perf_counter()
+        if self._on_cpu:
+            self._peak_rss = max(self._peak_rss, _rss_bytes())
 
         new_tokens = output.sequences[0, prompt_length:]
         token_list = new_tokens.tolist()
@@ -449,13 +570,13 @@ class QwenVisionEngine:
     def _recover_from_oom(
         self, request: AnalyzeRequest, image_size: tuple[int, int], input_tokens: int
     ) -> GpuOutOfMemoryError:
-        peak = torch.cuda.max_memory_allocated(self._device_index)
+        peak = self.peak_memory_bytes()
         gc.collect()
-        torch.cuda.empty_cache()
+        self._empty_cache()
         self._oom_events += 1
         self._last_oom_at = time.monotonic()
-        allocated = torch.cuda.memory_allocated(self._device_index)
-        reserved = torch.cuda.memory_reserved(self._device_index)
+        allocated = self._allocated_bytes()
+        reserved = torch.cuda.memory_reserved(self._device_index) if not self._on_cpu else allocated
         logger.error(
             "CUDA OOM on request %s (peak %.0f MB, ceiling %.0f MB); cache cleared",
             request.request_id,
@@ -522,7 +643,7 @@ class QwenVisionEngine:
 
     def health(self, *, queue_depth: int, uptime_s: float) -> HealthResponse:
         state = self.state
-        gpu_available = torch.cuda.is_available()
+        gpu_available = torch.cuda.is_available() and not self._on_cpu
         allocated = reserved = peak = total = 0.0
         gpu_count = 0
         if gpu_available:
@@ -548,7 +669,17 @@ class QwenVisionEngine:
                 status = "degraded"
                 detail = "CUDA out-of-memory within the last 60 s"
         warnings: list[str] = []
-        if self._baseline_bytes is not None and self._baseline_bytes > self.settings.baseline_budget_bytes:
+        if self._on_cpu:
+            warnings.append(
+                f"running on the CPU ({self.settings.cpu_dtype}, {torch.get_num_threads()} threads): expect answers "
+                f"to take 30 s or more; max_new_tokens is capped at {self.settings.cpu_max_new_tokens}"
+            )
+            if self._baseline_bytes is not None:
+                warnings.append(
+                    f"model uses {self._baseline_bytes / MB:.0f} MB RAM (process peak {self._peak_rss / MB:.0f} MB); "
+                    "VRAM fields are 0 in CPU mode"
+                )
+        elif self._baseline_bytes is not None and self._baseline_bytes > self.settings.baseline_budget_bytes:
             warnings.append(
                 f"baseline {self._baseline_bytes / MB:.0f} MB exceeds the "
                 f"{self.settings.baseline_budget_bytes / MB:.0f} MB budget"
@@ -559,7 +690,7 @@ class QwenVisionEngine:
             status=status,  # type: ignore[arg-type]
             model_id=self.settings.model_id,
             model_loaded=state == "ready",
-            quantization="nf4",
+            quantization=HEALTH_QUANTIZATION[self.settings.cpu_dtype] if self._on_cpu else "nf4",  # type: ignore[arg-type]
             gpu_available=gpu_available,
             gpu_name=self._gpu_name,
             gpu_count=gpu_count,
@@ -568,7 +699,7 @@ class QwenVisionEngine:
             vram_total_mb=round(total, 1),
             vram_peak_mb=round(peak, 1),
             vram_ceiling_mb=round(self.settings.vram_ceiling_bytes / MB, 1),
-            baseline_vram_mb=round(self._baseline_bytes / MB, 1) if self._baseline_bytes is not None else None,
+            baseline_vram_mb=round(self._baseline_bytes / MB, 1) if self._baseline_bytes is not None and not self._on_cpu else None,
             compute_capability=f"{cc[0]}.{cc[1]}" if cc else None,
             asr_model_id=self.settings.asr_model_id,
             asr_loaded=self._asr_model is not None,
@@ -582,11 +713,35 @@ class QwenVisionEngine:
     # -------------------------------------------------------------- benchmark
 
     def reset_peak_memory(self) -> None:
-        """Reset the allocator's peak counter (used by the benchmark between runs)."""
-        torch.cuda.reset_peak_memory_stats(self._device_index)
+        """Reset the peak counter (used between benchmark runs)."""
+        if self._on_cpu:
+            self._peak_rss = _rss_bytes()
+        else:
+            torch.cuda.reset_peak_memory_stats(self._device_index)
 
     def peak_memory_bytes(self) -> int:
+        if self._on_cpu:
+            return max(self._peak_rss, _rss_bytes())
         return int(torch.cuda.max_memory_allocated(self._device_index))
+
+    @property
+    def device(self) -> torch.device:
+        return self._device
+
+    @property
+    def _asr_dtype(self) -> torch.dtype:
+        return torch.float32 if self._on_cpu else torch.float16
+
+    def _allocated_bytes(self) -> int:
+        return _rss_bytes() if self._on_cpu else int(torch.cuda.memory_allocated(self._device_index))
+
+    def _synchronize(self) -> None:
+        if not self._on_cpu:
+            torch.cuda.synchronize(self._device)
+
+    def _empty_cache(self) -> None:
+        if not self._on_cpu:
+            torch.cuda.empty_cache()
 
     def runtime_versions(self) -> dict[str, str]:
         import bitsandbytes

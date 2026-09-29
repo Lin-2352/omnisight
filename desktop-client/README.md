@@ -23,15 +23,27 @@ No configuration is needed. By default the client reads the project's public gis
 
 Alt+C and Alt+V are consumed system-wide, so the focused app never receives them. Esc is passed through to the focused app as well. The tray icon offers Show HUD, Clear History, Settings (backend, local node URL, override URL, connection test, logs), a Backend submenu and Exit.
 
-## Choosing the GPU (backend)
+## Choosing where the model runs (backend)
 
 | Backend | Tiers tried | When to use |
 | --- | --- | --- |
-| `auto` (default) | Kaggle → local GPU → web fallback | Normal use |
+| `auto` (default) | Kaggle → this PC's node → web fallback | Normal use |
 | `kaggle` | Kaggle → web fallback | Best answers (Qwen2-VL-7B) |
-| `local` | Local GPU only | Private/offline, fastest; start the node first with `scripts\run-local-gpu.ps1` |
+| `local` | This PC's node only (GPU or CPU) | Private or offline; start the node first with `scripts\run-local-gpu.ps1` |
 
-The choice comes from `--backend`, then the tray/Settings choice (remembered in `HKCU\Software\OmniSight`), then `OMNISIGHT_BACKEND`. `scripts\run-local-gpu.ps1` creates a Python 3.12 `.venv-gpu` with CUDA 12.1 PyTorch and serves the same node as Kaggle on `127.0.0.1:8000` (Qwen2-VL-2B by default; `-Model 7b` needs about 7.5 GB of free VRAM).
+- **Where the choice comes from:** `--backend`, then the tray/Settings choice (remembered in `HKCU\Software\OmniSight`), then `OMNISIGHT_BACKEND`.
+- **What the script sets up:** `scripts\run-local-gpu.ps1` creates a Python 3.12 `.venv-gpu` with PyTorch and serves the same node as Kaggle on `127.0.0.1:8000`.
+- **`-Device auto`:** runs `scripts\capability_report.py`, which picks the GPU when it has enough free VRAM and otherwise the CPU when there is enough free RAM.
+- **Model sizes:** Qwen2-VL-2B is the default; `-Model 7b` needs about 7.5 GB of free VRAM.
+- **Timeouts:** the local tier gets a 300 s read timeout (`OMNISIGHT_LOCAL_TIMEOUT_S`), because a CPU node needs minutes for a long answer.
+- **This PC:** the Settings dialog shows a "This PC" line (CPU, RAM, GPU and the best local option).
+
+| Local node | First token | Decode | Memory peak | Quality |
+| --- | --- | --- | --- | --- |
+| RTX 4060 Laptop, 2B NF4 | 1.35 s | 34.6 tok/s | 3.2 GB VRAM | 2B quality |
+| i9-13980HX CPU, 2B float32 (default) | ~14 s | ~5 tok/s | 10.5 GB RAM | same as the GPU 2B |
+| i9-13980HX CPU, 2B int8 (`-CpuDtype int8`) | ~12 s | ~8 tok/s | 7.1 GB RAM | noticeably worse |
+| i9-13980HX CPU, 2B bfloat16 | over 2.5 min for 64 tokens (not finished) | — | — | unusable without native bf16 |
 
 ## Safeguards
 - **Black frames:** a capture whose 64-px luminance thumbnail has mean < 10 and std < 3 (display off, asleep or locked) is retried 3 times, 150 ms apart. If it is still black, the HUD says so and nothing is sent. Dark editors and terminals pass.
@@ -45,10 +57,11 @@ The choice comes from `--backend`, then the tray/Settings choice (remembered in 
 | `core/config.py` | `.env` loading, `ClientSettings`, `EndpointResolver` (30 s cache, ETag, stale/offline detection) |
 | `core/state.py` | `AppState` machine with a transition table and a result history |
 | `core/logger.py` | Colored console and `%APPDATA%\OmniSight\logs\client.log` (5 MB × 3) |
-| `capture/screen.py` | Per-monitor DPI awareness, foreground-monitor `mss` grab, black-frame rejection, LANCZOS resize, JPEG q75 4:4:4 → base64 |
+| `capture/screen.py` | Per-monitor DPI awareness, foreground-monitor `mss` grab, black-frame rejection, box + HAMMING resize, JPEG q75 4:4:4 → base64 |
 | `capture/audio.py` | Microphone consent check, 16 kHz mono push-to-talk into a 15 s ring buffer, silence trim, RMS normalization, in-memory WAV |
 | `network/schemas.py` | Shared contracts re-exported, plus `LatencyMetrics`, `EndpointResolution`, `ClientResult` |
-| `network/client.py` | Retries and backend-aware failover (Kaggle → local 127.0.0.1:8000 → `FALLBACK_API_URL`), `InferenceWorker` QThread |
+| `network/client.py` | Backend-aware failover (Kaggle → local 127.0.0.1:8000 → `FALLBACK_API_URL`), circuit breaker, retries, `InferenceWorker` QThread |
+| `core/capability.py` | Read-only CPU/RAM/NVIDIA GPU probe and the best-local-option recommendation |
 | `ui/components.py` | Status pill, latency badge, spinner, highlighted code block, copy buttons, toast |
 | `ui/hud.py` | Frameless, translucent, draggable overlay, excluded from screen capture |
 
@@ -62,17 +75,21 @@ The choice comes from `--backend`, then the tray/Settings choice (remembered in 
 
 | Situation | Behavior |
 | --- | --- |
-| Connection refused, DNS failure, 503 (loading), 507 (GPU OOM), 530 (tunnel down), read timeout | Move to the next tier immediately |
-| 429, 502, 504, connect timeout | Retry up to 2 times with jittered backoff (honoring `Retry-After`), then move on |
+| 502/504 gateway errors, 503 (loading), 507 (GPU OOM), 521-524/530 (tunnel/origin down), connect timeout, refused connection, DNS failure, read timeout | Move to the next tier immediately (measured under 200 ms from the failure) |
+| A tier that just failed | Skipped for 30 s by a circuit breaker, then tried again (the last tier is always tried) |
+| 429, 500 and other 5xx, a connection dropped mid-request | Retry up to 2 times with jittered backoff (honoring `Retry-After`), then move on |
 | 400, 401, 413, 422 | Show the error without failing over; the request itself is wrong |
 | Loopback tiers | Probed first with a 250 ms TCP check, because Windows takes about 2 s to refuse a closed local port |
 
-- **Timeouts:** connect 3 s; read 60 s (a 512-token answer takes about 40 s on a T4); 120 s overall deadline.
+- **Timeouts:** connect 3 s; read 60 s (a 512-token answer takes about 40 s on a T4); 300 s for the local node; 120 s overall deadline (extended to cover the local node).
 - **Web fallback tier:** backends `auto` and `kaggle` default to `https://omnisight-nine.vercel.app/api/fallback-infer`. When the Kaggle GPU is asleep, it forwards the screenshot to Gemini 2.5 Flash and otherwise answers with the verified presets. Set `FALLBACK_API_URL=off` to keep screenshots on Kaggle or your own GPU. The `local` backend never uses this tier.
 
 ## Measured on the development laptop (2560×1600 at 125%, Python 3.13)
 - **Grab:** 23–33 ms median, borderline against the 30 ms budget. GDI cost scales with pixel count, so a 1080p display grabs in roughly half that.
-- **Encode (resize + JPEG):** about 45–50 ms. Payloads were 60–230 KB for real screens, and 263 KB for a worst-case noise image after the quality ladder.
+- **Encode (resize + JPEG):**
+  - With a box pre-reduction plus HAMMING: about 8 ms at 2560×1440, 9 ms at 4K, and 16 ms for the whole 1080p capture pipeline. It was 34–57 ms with a plain LANCZOS resize.
+  - 10 pt code text keeps SSIM ≥ 0.98 against the LANCZOS result.
+  - Payloads were 60–230 KB for real screens, and 263 KB for a worst-case noise image after the quality ladder.
 - **Microphone:** requires Windows Settings → Privacy & security → Microphone, with both toggles on. Otherwise the HUD shows the permission card described above.
 - **Black-frame check:** 0.13–1.3 ms per frame. A display that stays off raises the error after 4 grabs (about 0.46 s).
 - **Local GPU backend (RTX 4060 Laptop 8 GB, Qwen2-VL-2B NF4):**

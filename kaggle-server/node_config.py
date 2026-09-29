@@ -80,6 +80,19 @@ class ServerSettings(BaseModel):
     vram_ceiling_gb: float = Field(default=11.0, gt=0)
     baseline_budget_gb: float = Field(default=5.8, gt=0)
 
+    # --- Device ---------------------------------------------------------------------
+    #: "auto" = CUDA when available, else the CPU. "cpu" runs the model unquantized on the
+    #: CPU (no GPU needed; much slower). "cuda" fails fast when no GPU is usable.
+    device: Literal["auto", "cuda", "cpu"] = "auto"
+    #: CPU weights. Measured on an i9-13980HX (AVX2, 2B, 896x504 pixels): float32 ~14 s to the
+    #: first token, ~5 tok/s, 10.5 GB RAM peak, correct answers; int8 (dynamic, language model
+    #: only) ~12 s, ~8 tok/s, 7.1 GB, but noticeably worse answers; bfloat16 is unusably slow
+    #: without native bf16 instructions (AVX-512 BF16 / AMX).
+    cpu_dtype: Literal["float32", "bfloat16", "int8"] = "float32"
+    cpu_threads: int | None = Field(default=None, ge=1, le=512)
+    #: CPU decoding runs at a few tokens/s, so answers are capped to keep them under a few minutes.
+    cpu_max_new_tokens: int = Field(default=256, ge=16, le=512)
+
     # --- Generation / vision -------------------------------------------------------
     min_pixels: int = Field(default=256 * 256, ge=28 * 28)
     max_pixels: int = Field(default=1280 * 720, ge=28 * 28)
@@ -124,7 +137,8 @@ class ServerSettings(BaseModel):
     @property
     def model_label(self) -> str:
         """Human label published to the gist, e.g. ``Qwen2-VL-7B-Instruct-4bit``."""
-        return f"{self.model_id.rsplit('/', 1)[-1]}-4bit"
+        name = self.model_id.rsplit('/', 1)[-1]
+        return f"{name}-cpu-{self.cpu_dtype}" if self.device == "cpu" else f"{name}-4bit"
 
     @classmethod
     def from_environment(
@@ -183,6 +197,12 @@ class ServerSettings(BaseModel):
         _put(raw, "min_pixels", get("OMNISIGHT_MIN_PIXELS"))
         _put(raw, "max_pixels", get("OMNISIGHT_MAX_PIXELS"))
         _put(raw, "repetition_penalty", get("OMNISIGHT_REPETITION_PENALTY"))
+        device = get("OMNISIGHT_DEVICE")
+        _put(raw, "device", device.lower() if device else None)
+        cpu_dtype = get("OMNISIGHT_CPU_DTYPE")
+        _put(raw, "cpu_dtype", cpu_dtype.lower() if cpu_dtype else None)
+        _put(raw, "cpu_threads", get("OMNISIGHT_CPU_THREADS"))
+        _put(raw, "cpu_max_new_tokens", get("OMNISIGHT_CPU_MAX_NEW_TOKENS"))
         protocol = get("OMNISIGHT_TUNNEL_PROTOCOL")
         _put(raw, "tunnel_protocol", protocol.lower() if protocol else None)
         _put(raw, "cloudflared_bin", get("OMNISIGHT_CLOUDFLARED_BIN"))
@@ -212,6 +232,8 @@ class ServerSettings(BaseModel):
             "pixels": f"{self.min_pixels}..{self.max_pixels}",
             "quantize_lm_head": self.quantize_lm_head,
             "quantize_vision": self.quantize_vision,
+            "device": self.device,
+            "cpu_dtype": self.cpu_dtype,
             "tunnel_protocol": self.tunnel_protocol,
         }
 

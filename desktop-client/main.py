@@ -64,6 +64,7 @@ from capture.audio import (  # noqa: E402
     microphone_permission,
 )
 from capture.screen import BlackFrameError, CaptureResult, ScreenCapturer  # noqa: E402
+from core.capability import describe, probe  # noqa: E402
 from core.config import BACKENDS, ClientSettings, EndpointResolver  # noqa: E402
 from core.logger import configure_logging, default_log_dir, get_logger  # noqa: E402
 from core.state import AppState, StateMachine  # noqa: E402
@@ -352,8 +353,11 @@ class SettingsDialog(QDialog):
         self.backend.setCurrentIndex(list(BACKENDS).index(controller.settings.backend))
         form.addRow("Backend:", self.backend)
         self.local_url = QLineEdit(controller.settings.local_dev_url)
-        self.local_url.setPlaceholderText("http://127.0.0.1:8000 (scripts\\run-local-gpu.ps1)")
-        form.addRow("Local GPU node:", self.local_url)
+        self.local_url.setPlaceholderText("http://127.0.0.1:8000 (scripts\\run-local-gpu.ps1, GPU or -Device cpu)")
+        form.addRow("Local node:", self.local_url)
+        this_pc = QLabel(controller.capability_line or "checking this PC's CPU, RAM and GPU...")
+        this_pc.setWordWrap(True)
+        form.addRow("This PC:", this_pc)
         form.addRow("Fallback URL:", QLabel(controller.settings.fallback_api_url or "not set (FALLBACK_API_URL)"))
         form.addRow("Hotkeys:", QLabel("Alt+C analyze   ·   hold Alt+V voice   ·   Esc hide"))
         layout.addLayout(form)
@@ -471,7 +475,8 @@ class OmniSightController(QObject):
         if enable_hotkeys:
             self.hotkeys.start()
 
-        self.pool.start(_WarmUp(self.capturer))
+        self.capability_line = ""
+        self.pool.start(_WarmUp(self.capturer, self))
         logger.info("OmniSight client %s ready", CONTRACT_VERSION)
 
     # -- tray -----------------------------------------------------------------
@@ -668,17 +673,27 @@ class OmniSightController(QObject):
 
 
 class _WarmUp(QRunnable):
-    """First grab on the capture thread so the user's first Alt+C is not the slow one."""
+    """First grab on the capture thread so the user's first Alt+C is not the slow one.
 
-    def __init__(self, capturer: ScreenCapturer) -> None:
+    Also probes this PC's CPU/RAM/GPU once (nvidia-smi can take a moment) for the log
+    and the Settings dialog.
+    """
+
+    def __init__(self, capturer: ScreenCapturer, controller: OmniSightController) -> None:
         super().__init__()
         self.capturer = capturer
+        self.controller = controller
 
     def run(self) -> None:
         try:
             logger.info("capture warm-up %.1f ms [tid %d]", self.capturer.warm_up(), threading.get_native_id())
         except Exception as exc:  # noqa: BLE001 - warm-up is best effort
             logger.warning("capture warm-up failed: %s", exc)
+        try:
+            self.controller.capability_line = describe(probe())
+            logger.info("this PC: %s", self.controller.capability_line)
+        except Exception as exc:  # noqa: BLE001 - informational only
+            logger.warning("capability probe failed: %s", exc)
 
 
 def main(argv: list[str] | None = None) -> int:

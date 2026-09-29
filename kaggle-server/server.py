@@ -296,8 +296,13 @@ def create_app(engine: InferenceEngine, settings: ServerSettings) -> FastAPI:
             message="internal server error",
             retryable=False,
         )
+        # This handler runs in Starlette's outermost error middleware, outside
+        # RequestIdMiddleware, so echo the request id here to keep 500s traceable.
+        request_id = request.scope.get("state", {}).get("request_id")
         return JSONResponse(
-            status_code=ERROR_HTTP_STATUS[ErrorCode.INTERNAL_ERROR], content=body.model_dump(mode="json")
+            status_code=ERROR_HTTP_STATUS[ErrorCode.INTERNAL_ERROR],
+            content=body.model_dump(mode="json"),
+            headers={REQUEST_ID_HEADER: request_id} if request_id else None,
         )
 
     # -- routes ---------------------------------------------------------------

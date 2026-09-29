@@ -81,7 +81,7 @@ def main(argv: list[str] | None = None) -> int:
     _configure_logging(settings.log_level)
     logger.info("settings: %s", settings.describe())
 
-    from engine import QwenVisionEngine, describe_gpu  # torch is imported only here
+    from engine import QwenVisionEngine, describe_device  # torch is imported only here
 
     engine = QwenVisionEngine(settings)
     keepalive = KeepAlive(settings.keepalive_interval_s, gpu_lock=engine.gpu_lock).start()
@@ -131,7 +131,7 @@ def main(argv: list[str] | None = None) -> int:
             command=resolve_cloudflared_command(settings.cloudflared_bin),
             port=settings.port,
             model_label=settings.model_label,
-            gpu_device=describe_gpu(),
+            gpu_device=describe_device(settings),
             status_provider=node_status,  # type: ignore[arg-type]
             publisher=publisher,
             protocol=settings.tunnel_protocol,

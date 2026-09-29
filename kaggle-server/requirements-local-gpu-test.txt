@@ -1,0 +1,7 @@
+# Test tools for the hardware suites in .venv-gpu (tests/hardware/test_local_gpu.py, test_local_cpu.py).
+#   uv pip install --python .venv-gpu\Scripts\python.exe -r kaggle-server\requirements-local-gpu-test.txt
+pytest==8.3.3
+pytest-timeout==2.4.0
+# fastapi 0.115.0's TestClient relies on the httpx<0.28 `app=` API
+httpx==0.27.2
+responses==0.26.3

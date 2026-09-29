@@ -23,6 +23,11 @@ uvicorn==0.30.6
 
 # Test runner and tooling
 pytest==8.3.3
+pytest-cov==7.1.0
+pytest-timeout==2.4.0
+# HTTP mocking for the requests-based client (gist, Kaggle node, web fallback)
+responses==0.26.3
+psutil==7.2.2
 packaging>=24.1
 
 # Image / numeric stack used by compression and payload tests
