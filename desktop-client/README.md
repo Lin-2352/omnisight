@@ -68,7 +68,7 @@ The choice comes from `--backend`, then the tray/Settings choice (remembered in 
 | Loopback tiers | Probed first with a 250 ms TCP check, because Windows takes about 2 s to refuse a closed local port |
 
 - **Timeouts:** connect 3 s; read 60 s (a 512-token answer takes about 40 s on a T4); 120 s overall deadline.
-- **Web fallback tier:** `FALLBACK_API_URL` points at the web showcase's `/api/fallback-infer` (Gemini, then verified presets).
+- **Web fallback tier:** backends `auto` and `kaggle` default to `https://omnisight-nine.vercel.app/api/fallback-infer`. When the Kaggle GPU is asleep, it forwards the screenshot to Gemini 2.5 Flash and otherwise answers with the verified presets. Set `FALLBACK_API_URL=off` to keep screenshots on Kaggle or your own GPU. The `local` backend never uses this tier.
 
 ## Measured on the development laptop (2560×1600 at 125%, Python 3.13)
 - **Grab:** 23–33 ms median, borderline against the 30 ms budget. GDI cost scales with pixel count, so a 1080p display grabs in roughly half that.

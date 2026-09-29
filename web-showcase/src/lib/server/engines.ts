@@ -86,6 +86,23 @@ interface GeminiResponse {
   usageMetadata?: { candidatesTokenCount?: number };
 }
 
+/** Extra output budget for models whose thinking cannot be turned off (it counts against maxOutputTokens). */
+const THINKING_HEADROOM_TOKENS = 2048;
+
+/**
+ * Gemini 2.5 models "think" before answering, and those hidden tokens are billed against
+ * maxOutputTokens: with a 384-token budget the visible answer was cut off after 16-42 tokens.
+ * Flash models accept thinkingBudget 0 (answers stay fast); others get extra headroom instead.
+ */
+export function geminiGenerationConfig(model: string, request: AnalyzeRequest): Record<string, unknown> {
+  const answerTokens = request.max_new_tokens ?? 512;
+  const base = { temperature: request.temperature ?? 0.1 };
+  if (/flash/i.test(model)) {
+    return { ...base, maxOutputTokens: answerTokens, thinkingConfig: { thinkingBudget: 0 } };
+  }
+  return { ...base, maxOutputTokens: answerTokens + THINKING_HEADROOM_TOKENS };
+}
+
 export async function analyzeWithGemini(request: AnalyzeRequest, apiKey: string, timeoutMs: number): Promise<AnalyzeResponse> {
   const model = process.env.FALLBACK_MODEL || DEFAULT_FALLBACK_MODEL;
   const base = (process.env.GEMINI_API_BASE || "https://generativelanguage.googleapis.com").replace(/\/+$/, "");
@@ -101,7 +118,7 @@ export async function analyzeWithGemini(request: AnalyzeRequest, apiKey: string,
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
         contents: [{ role: "user", parts }],
-        generationConfig: { temperature: request.temperature ?? 0.1, maxOutputTokens: request.max_new_tokens ?? 512 },
+        generationConfig: geminiGenerationConfig(model, request),
       }),
       signal: AbortSignal.timeout(timeoutMs),
       cache: "no-store",

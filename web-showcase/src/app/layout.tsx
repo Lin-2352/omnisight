@@ -10,7 +10,7 @@ const inter = Inter({ subsets: ["latin"], display: "optional", variable: "--font
 const mono = JetBrains_Mono({ subsets: ["latin"], display: "optional", variable: "--font-mono", weight: ["400", "600"] });
 
 export const metadata: Metadata = {
-  metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL || "https://omnisight.vercel.app"),
+  metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL || "https://omnisight-nine.vercel.app"),
   title: {
     default: "OmniSight - multimodal screen intelligence for developers",
     template: "%s · OmniSight",

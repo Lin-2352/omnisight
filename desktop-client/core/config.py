@@ -39,6 +39,10 @@ DEFAULT_GIST_ID: Final[str] = "fc8433475a1a2d424ad8e06724e59731"
 GIST_FILENAME: Final[str] = "omnisight-endpoint.json"
 GITHUB_API_BASE: Final[str] = "https://api.github.com"
 LOCAL_DEV_URL: Final[str] = "http://127.0.0.1:8000"
+# Last failover tier: the public web showcase (Gemini, then verified presets). Set
+# FALLBACK_API_URL=off to never send screenshots beyond Kaggle or the local GPU.
+DEFAULT_FALLBACK_API_URL: Final[str] = "https://omnisight-nine.vercel.app/api/fallback-infer"
+FALLBACK_DISABLED_VALUES: Final[frozenset[str]] = frozenset({"off", "none", "disabled", "0"})
 ANALYZE_PATH: Final[str] = "/v1/analyze"
 HEALTH_PATH: Final[str] = "/v1/health"
 GIST_TIMEOUT_S: Final[float] = 2.5
@@ -78,6 +82,15 @@ def _url_or_none(name: str, value: str | None) -> str | None:
     if not value.startswith(("http://", "https://")):
         raise ValueError(f"{name} must start with http:// or https:// (got {value!r})")
     return value.rstrip("/")
+
+
+def _fallback_url(value: str | None) -> str | None:
+    """Unset means the public web showcase; ``off`` disables the web tier entirely."""
+    if value is None:
+        return DEFAULT_FALLBACK_API_URL
+    if value.lower() in FALLBACK_DISABLED_VALUES:
+        return None
+    return _url_or_none("FALLBACK_API_URL", value)
 
 
 def _float(env: Mapping[str, str], name: str, default: float) -> float:
@@ -139,7 +152,7 @@ class ClientSettings:
         return cls(
             gist_id=_first(env, "GITHUB_GIST_ID", "OMNISIGHT_GIST_ID") or DEFAULT_GIST_ID,
             github_token=_first(env, "OMNISIGHT_CLIENT_GITHUB_TOKEN", "GITHUB_TOKEN"),
-            fallback_api_url=_url_or_none("FALLBACK_API_URL", _first(env, "FALLBACK_API_URL")),
+            fallback_api_url=_fallback_url(_first(env, "FALLBACK_API_URL")),
             manual_override_url=_url_or_none(
                 "MANUAL_OVERRIDE_URL", _first(env, "MANUAL_OVERRIDE_URL", "OMNISIGHT_ENDPOINT_OVERRIDE")
             ),

@@ -22,13 +22,22 @@ type GistMode = "online" | "stale" | "offline" | "missing";
 type NodeMode = "ok" | "hang" | "loading" | "reject";
 type GeminiMode = "ok" | "down";
 
-const state: { gist: GistMode; node: NodeMode; gemini: GeminiMode; geminiCalls: number; nodeAnalyzeCalls: number; geminiKeySeen: string | null } = {
+const state: {
+  gist: GistMode;
+  node: NodeMode;
+  gemini: GeminiMode;
+  geminiCalls: number;
+  nodeAnalyzeCalls: number;
+  geminiKeySeen: string | null;
+  geminiThinkingBudget: number | null;
+} = {
   gist: "online",
   node: "ok",
   gemini: "ok",
   geminiCalls: 0,
   nodeAnalyzeCalls: 0,
   geminiKeySeen: null,
+  geminiThinkingBudget: null,
 };
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
@@ -101,7 +110,11 @@ const gistStub = createServer((req, res) => {
 const geminiStub = createServer(async (req, res) => {
   state.geminiCalls += 1;
   state.geminiKeySeen = (req.headers["x-goog-api-key"] as string | undefined) ?? null;
-  const body = JSON.parse(await readBody(req)) as { contents?: { parts?: { inline_data?: { data?: string } }[] }[] };
+  const body = JSON.parse(await readBody(req)) as {
+    contents?: { parts?: { inline_data?: { data?: string } }[] }[];
+    generationConfig?: { maxOutputTokens?: number; thinkingConfig?: { thinkingBudget?: number } };
+  };
+  state.geminiThinkingBudget = body.generationConfig?.thinkingConfig?.thinkingBudget ?? null;
   if (state.gemini === "down") return sendJson(res, 503, { error: { code: 503, message: "overloaded" } });
   assert.ok(body.contents?.[0]?.parts?.[0]?.inline_data?.data, "gemini stub: image must be sent inline");
   sendJson(res, 200, {
@@ -249,6 +262,8 @@ async function main(): Promise<number> {
       assert.equal(r.json.model_id, "gemini-2.5-flash");
       assert.match(String(r.json.summary), /off by one/);
       assert.equal(state.geminiKeySeen, GEMINI_TEST_KEY, "key must be sent to Gemini in the x-goog-api-key header");
+      // Thinking tokens count against maxOutputTokens and truncated live answers to 16-42 tokens.
+      assert.equal(state.geminiThinkingBudget, 0, "gemini-2.5-flash must be called with thinkingBudget 0");
       assert.match(r.trace ?? "", /kaggle:unresponsive/);
       assert.ok(r.ms >= 2900 && r.ms < 8000, `failover took ${r.ms} ms; expected the 3 s probe budget`);
       return `(${r.ms} ms, trace ${r.trace})`;
