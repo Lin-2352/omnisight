@@ -357,6 +357,28 @@ def _calls(tree: ast.AST, name: str) -> list[ast.Call]:
     return found
 
 
+@check("static", "every imported name in every node module resolves (incl. torch-only modules)")
+def _import_names() -> str:
+    import importlib
+
+    local = {path.stem for path in KAGGLE_DIR.glob("*.py")}
+    checked = 0
+    problems: list[str] = []
+    for path in sorted(KAGGLE_DIR.glob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.ImportFrom) or not node.module:
+                continue
+            if node.module != "omnisight_contracts" and node.module not in local - {"engine"}:
+                continue
+            module = importlib.import_module(node.module)
+            for alias in node.names:
+                checked += 1
+                if not hasattr(module, alias.name):
+                    problems.append(f"{path.name}: from {node.module} import {alias.name}")
+    expect(not problems, f"unresolved imports: {problems}")
+    return f"{checked} imported names resolve across {len(local)} modules"
+
+
 @check("static", "engine.py matches the Phase 2 model/quantization spec")
 def _engine_spec() -> str:
     source = (KAGGLE_DIR / "engine.py").read_text(encoding="utf-8")
