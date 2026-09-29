@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from typing import Any, Final
 
 import mss
-from PIL import Image
+from PIL import Image, ImageStat
 
 from core.logger import get_logger
 from network.schemas import MAX_IMAGE_BYTES, ImagePayload
@@ -36,6 +36,12 @@ JPEG_QUALITY: Final[int] = 75
 MAX_B64_BYTES: Final[int] = MAX_IMAGE_BYTES
 #: Fallback ladder used only when quality 75 / 4:4:4 exceeds the budget.
 _LADDER: Final[tuple[tuple[int, int], ...]] = ((75, 0), (65, 0), (55, 0), (55, 2), (45, 2), (35, 2))
+#: A frame is "black" when its luminance is both dark and flat. A dark IDE or terminal
+#: still has text contrast (std well above 3), so it passes.
+BLACK_MEAN_MAX: Final[float] = 10.0
+BLACK_STD_MAX: Final[float] = 3.0
+BLACK_FRAME_RETRIES: Final[int] = 3
+BLACK_FRAME_RETRY_DELAY_S: Final[float] = 0.15
 
 _dpi_lock = threading.Lock()
 _dpi_mode: str | None = None
@@ -165,6 +171,31 @@ def pick_monitor(monitors: list[dict[str, int]], point: tuple[int, int] | None) 
 # ---------------------------------------------------------------------------
 
 
+class BlackFrameError(RuntimeError):
+    """Every capture attempt returned a black frame (display off, asleep, locked, or waking)."""
+
+
+@dataclass(frozen=True)
+class FrameStats:
+    mean: float
+    std: float
+
+    @property
+    def is_black(self) -> bool:
+        return self.mean < BLACK_MEAN_MAX and self.std < BLACK_STD_MAX
+
+
+def frame_stats(image: Image.Image) -> FrameStats:
+    """Luminance mean and standard deviation of a ~64 px wide thumbnail (well under 1 ms)."""
+    factor = max(1, image.width // 64)
+    thumbnail = image.reduce(factor).convert("L")
+    try:
+        stat = ImageStat.Stat(thumbnail)
+        return FrameStats(round(stat.mean[0], 2), round(stat.stddev[0], 2))
+    finally:
+        thumbnail.close()
+
+
 @dataclass(frozen=True)
 class CaptureResult:
     image_b64: str
@@ -283,11 +314,30 @@ class ScreenCapturer:
         if not 1 <= index < len(monitors):
             raise ValueError(f"monitor {index} does not exist (found {len(monitors) - 1})")
         monitor = monitors[index]
-        started = time.perf_counter()
-        shot = sct.grab(monitor)
-        grabbed = time.perf_counter()
-        image = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
-        del shot
+        image: Image.Image | None = None
+        stats = FrameStats(0.0, 0.0)
+        for attempt in range(1 + BLACK_FRAME_RETRIES):
+            if image is not None:
+                image.close()
+                time.sleep(BLACK_FRAME_RETRY_DELAY_S)
+            started = time.perf_counter()
+            shot = sct.grab(monitor)
+            grabbed = time.perf_counter()
+            image = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+            del shot
+            stats = frame_stats(image)
+            if not stats.is_black:
+                break
+            logger.warning(
+                "black frame on monitor %d (mean %.1f, std %.1f), attempt %d/%d",
+                index, stats.mean, stats.std, attempt + 1, 1 + BLACK_FRAME_RETRIES,
+            )
+        assert image is not None
+        if stats.is_black:
+            image.close()
+            raise BlackFrameError(
+                "The screen looks black - the display may be off, asleep or locked. Nothing was sent."
+            )
         try:
             encoded = encode_image(image, max_width=self.max_width, max_b64_bytes=self.max_b64_bytes)
             original = f"{image.width}x{image.height}"

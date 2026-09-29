@@ -11,6 +11,7 @@ from __future__ import annotations
 import ctypes
 import os
 import re
+from collections.abc import Callable
 from typing import Final
 
 from PyQt6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QRect, Qt, pyqtSignal
@@ -274,6 +275,27 @@ class HudWindow(QWidget):
         status_row.addWidget(self.status_label, 1)
         body_layout.addLayout(status_row)
 
+        # Optional buttons under an error message (e.g. "Open microphone settings").
+        self.error_actions = QWidget(self.body)
+        error_actions_layout = QHBoxLayout(self.error_actions)
+        error_actions_layout.setContentsMargins(28, 0, 0, 0)
+        error_actions_layout.setSpacing(8)
+        self._error_buttons: list[QPushButton] = []
+        for _ in range(2):
+            button = QPushButton(self.error_actions)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setStyleSheet(
+                f"QPushButton {{ color: {BLUE}; background: {SURFACE0}; border: 1px solid {SURFACE1}; "
+                f"border-radius: 7px; padding: 5px 12px; font-weight: 600; }}"
+                f"QPushButton:hover {{ background: {SURFACE1}; }}"
+            )
+            button.hide()
+            error_actions_layout.addWidget(button)
+            self._error_buttons.append(button)
+        error_actions_layout.addStretch(1)
+        self.error_actions.hide()
+        body_layout.addWidget(self.error_actions)
+
         self.scroll = QScrollArea(self.body)
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -432,11 +454,13 @@ class HudWindow(QWidget):
             self.fade_in()
         self._apply_geometry()
 
-    def show_error(self, message: str) -> None:
+    def show_error(self, message: str, actions: list[tuple[str, Callable[[], None]]] | None = None) -> None:
+        """Show ``message`` in red, with up to two optional ``(label, callback)`` buttons below it."""
         self.title_bar.pill.set_state("error", RED)
         self.title_bar.badge.set_latency(None)
         self.spinner.stop()
         self._clear_result()
+        self._set_error_actions(actions or [])
         self.scroll.hide()
         self.actions.hide()
         self.status_label.setText(message)
@@ -446,7 +470,23 @@ class HudWindow(QWidget):
             self.fade_in()
         self._apply_geometry()
 
+    def _set_error_actions(self, actions: list[tuple[str, Callable[[], None]]]) -> None:
+        for index, button in enumerate(self._error_buttons):
+            try:
+                button.clicked.disconnect()
+            except TypeError:
+                pass  # no previous connection
+            if index < len(actions):
+                label, callback = actions[index]
+                button.setText(label)
+                button.clicked.connect(callback)
+                button.show()
+            else:
+                button.hide()
+        self.error_actions.setVisible(bool(actions))
+
     def _clear_result(self) -> None:
+        self._set_error_actions([])
         self.status_label.setStyleSheet(f"color: {SUBTEXT}; font-size: 10pt;")
         self.summary.clear()
         self.diagnostic.clear()

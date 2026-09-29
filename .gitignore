@@ -68,6 +68,7 @@ __pycache__/
 *.pyd
 .Python
 .venv/
+.venv-gpu/
 venv/
 env/
 ENV/

@@ -1,0 +1,31 @@
+# =============================================================================
+# OmniSight inference node on a local Windows NVIDIA GPU (instead of Kaggle)
+#
+# Target runtime : Windows 10/11 x64, NVIDIA GPU with >= 4 GB free VRAM
+#                  (the default Qwen2-VL-2B uses ~2 GB; 7B needs ~6 GB at load)
+# Python         : 3.10 - 3.12 (torch 2.3.1 publishes no cp313 wheels).
+#                  scripts\run-local-gpu.ps1 creates a uv-managed 3.12 venv.
+#
+# Same library bounds as requirements-kaggle.txt, but torch/torchvision come from
+# the PyTorch CUDA 12.1 index (PyPI's Windows torch wheels are CPU-only).
+# No pycloudflared: the local node serves 127.0.0.1 only and publishes nothing.
+# =============================================================================
+--extra-index-url https://download.pytorch.org/whl/cu121
+
+# --- Core deep-learning stack -------------------------------------------------
+torch==2.3.1+cu121
+torchvision==0.18.1+cu121
+transformers>=4.45.0,<4.50
+accelerate>=0.34.0,<2
+bitsandbytes>=0.43.0,<0.46
+numpy>=1.26.0,<2
+
+# --- Serving layer ------------------------------------------------------------
+fastapi==0.115.0
+uvicorn==0.30.6
+pydantic==2.9.2
+requests==2.32.3
+
+# --- Image handling / telemetry ------------------------------------------------
+pillow>=10.4.0
+psutil>=5.9.8

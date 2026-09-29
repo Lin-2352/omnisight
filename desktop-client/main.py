@@ -37,10 +37,11 @@ from capture.screen import enable_dpi_awareness  # noqa: E402
 
 enable_dpi_awareness()
 
-from PyQt6.QtCore import QObject, QRunnable, QThreadPool, QTimer, QUrl, pyqtSignal  # noqa: E402
-from PyQt6.QtGui import QAction, QColor, QDesktopServices, QIcon, QPainter, QPen, QPixmap  # noqa: E402
+from PyQt6.QtCore import QObject, QRunnable, QSettings, QThreadPool, QTimer, QUrl, pyqtSignal  # noqa: E402
+from PyQt6.QtGui import QAction, QActionGroup, QColor, QDesktopServices, QIcon, QPainter, QPen, QPixmap  # noqa: E402
 from PyQt6.QtWidgets import (  # noqa: E402
     QApplication,
+    QComboBox,
     QDialog,
     QFormLayout,
     QHBoxLayout,
@@ -52,9 +53,18 @@ from PyQt6.QtWidgets import (  # noqa: E402
     QVBoxLayout,
 )
 
-from capture.audio import AudioDeviceError, AudioRecorder, NoSpeechError, RecordingResult  # noqa: E402
-from capture.screen import CaptureResult, ScreenCapturer  # noqa: E402
-from core.config import ClientSettings, EndpointResolver  # noqa: E402
+from capture.audio import (  # noqa: E402
+    MIC_SETTINGS_URI,
+    PERMISSION_MESSAGES,
+    AudioDeviceError,
+    AudioRecorder,
+    MicrophonePermissionError,
+    NoSpeechError,
+    RecordingResult,
+    microphone_permission,
+)
+from capture.screen import BlackFrameError, CaptureResult, ScreenCapturer  # noqa: E402
+from core.config import BACKENDS, ClientSettings, EndpointResolver  # noqa: E402
 from core.logger import configure_logging, default_log_dir, get_logger  # noqa: E402
 from core.state import AppState, StateMachine  # noqa: E402
 from network.client import HealthCheckWorker, InferenceWorker, build_request  # noqa: E402
@@ -281,6 +291,10 @@ class CaptureTask(QRunnable):
         except AudioDeviceError as exc:
             self.signals.failed.emit(str(exc))
             return
+        except BlackFrameError as exc:
+            logger.warning("capture aborted: %s", exc)
+            self.signals.failed.emit(str(exc))
+            return
         except Exception as exc:  # noqa: BLE001 - report every capture failure to the HUD
             logger.exception("capture failed")
             self.signals.failed.emit(f"Screen capture failed: {type(exc).__name__}: {exc}")
@@ -320,7 +334,7 @@ class SettingsDialog(QDialog):
         self.setMinimumWidth(520)
         self.setStyleSheet(
             f"QDialog {{ background: {BASE}; }} QLabel {{ color: {TEXT}; }}"
-            f"QLineEdit {{ background: {SURFACE0}; color: {TEXT}; border-radius: 6px; padding: 5px; }}"
+            f"QLineEdit, QComboBox {{ background: {SURFACE0}; color: {TEXT}; border-radius: 6px; padding: 5px; }}"
             f"QPushButton {{ background: {SURFACE0}; color: {TEXT}; border-radius: 6px; padding: 5px 12px; }}"
         )
         layout = QVBoxLayout(self)
@@ -332,6 +346,14 @@ class SettingsDialog(QDialog):
         self.override = QLineEdit(controller.settings.manual_override_url or "")
         self.override.setPlaceholderText("https://<name>.trycloudflare.com (empty = use the gist)")
         form.addRow("Override URL:", self.override)
+        self.backend = QComboBox()
+        for key, label in BACKENDS.items():
+            self.backend.addItem(label, key)
+        self.backend.setCurrentIndex(list(BACKENDS).index(controller.settings.backend))
+        form.addRow("Backend:", self.backend)
+        self.local_url = QLineEdit(controller.settings.local_dev_url)
+        self.local_url.setPlaceholderText("http://127.0.0.1:8000 (scripts\\run-local-gpu.ps1)")
+        form.addRow("Local GPU node:", self.local_url)
         form.addRow("Fallback URL:", QLabel(controller.settings.fallback_api_url or "not set (FALLBACK_API_URL)"))
         form.addRow("Hotkeys:", QLabel("Alt+C analyze   ·   hold Alt+V voice   ·   Esc hide"))
         layout.addLayout(form)
@@ -354,6 +376,8 @@ class SettingsDialog(QDialog):
     def apply(self) -> None:
         try:
             self.controller.set_override(self.override.text())
+            self.controller.set_local_url(self.local_url.text())
+            self.controller.set_backend(str(self.backend.currentData()))
         except ValueError as exc:
             self.result_label.setText(str(exc))
             return
@@ -390,6 +414,8 @@ class OmniSightController(QObject):
         self._retired_workers: list[InferenceWorker] = []
         self._pending_mode = AnalysisMode.DEBUG
         self._settings_dialog: SettingsDialog | None = None
+        self._error_actions: list[tuple[str, Any]] = []
+        self._mic_notice_pending = False
 
         self.state.state_changed.connect(self._on_state_changed)
         self.hud.dismissed.connect(self.state.reset)
@@ -401,19 +427,41 @@ class OmniSightController(QObject):
             ("Show HUD", self.show_hud),
             ("Clear History", self.clear_history),
             ("Settings", self.open_settings),
-            (None, None),
-            ("Exit", self.app.quit),
         ):
-            if label is None:
-                menu.addSeparator()
-                continue
             action = QAction(label, menu)
             action.triggered.connect(slot)
             menu.addAction(action)
+        backend_menu = menu.addMenu("Backend")
+        self._backend_group = QActionGroup(backend_menu)
+        self._backend_group.setExclusive(True)
+        self._backend_actions: dict[str, QAction] = {}
+        for key, label in BACKENDS.items():
+            action = QAction(label, backend_menu)
+            action.setCheckable(True)
+            action.setChecked(key == self.settings.backend)
+            action.triggered.connect(lambda _checked=False, choice=key: self.set_backend(choice))
+            self._backend_group.addAction(action)
+            backend_menu.addAction(action)
+            self._backend_actions[key] = action
+        menu.addSeparator()
+        exit_action = QAction("Exit", menu)
+        exit_action.triggered.connect(self.app.quit)
+        menu.addAction(exit_action)
         self.tray.setContextMenu(menu)
         self._menu = menu
         self.tray.activated.connect(self._on_tray_activated)
         self.tray.show()
+        self.tray.messageClicked.connect(self._on_tray_message_clicked)
+        permission = microphone_permission()
+        if permission.startswith("denied"):
+            logger.warning("microphone blocked by Windows privacy settings (%s)", permission)
+            self._mic_notice_pending = True
+            self.tray.showMessage(
+                "OmniSight",
+                "Microphone access is off, so Alt+V can't record. Click here to open the microphone settings.",
+                QSystemTrayIcon.MessageIcon.Warning,
+                8000,
+            )
 
         self.hotkeys = HotkeyBridge()
         self.hotkeys.capture_requested.connect(self.on_capture_requested)
@@ -458,6 +506,24 @@ class OmniSightController(QObject):
         self.settings = self.settings.with_override(url)
         self.resolver.update_settings(self.settings)
 
+    def set_backend(self, backend: str) -> None:
+        """Switch between auto / kaggle / local and remember the choice across restarts."""
+        self.settings = self.settings.with_backend(backend)
+        self.resolver.update_settings(self.settings)
+        QSettings().setValue("backend", self.settings.backend)
+        action = self._backend_actions.get(self.settings.backend)
+        if action is not None and not action.isChecked():
+            action.setChecked(True)
+        logger.info("backend set to %s", self.settings.backend)
+        self.tray.showMessage(
+            "OmniSight", f"Backend: {BACKENDS[self.settings.backend]}", QSystemTrayIcon.MessageIcon.Information, 2500
+        )
+
+    def set_local_url(self, url: str) -> None:
+        self.settings = self.settings.with_local_url(url)
+        self.resolver.update_settings(self.settings)
+        QSettings().setValue("local_url", self.settings.local_dev_url)
+
     # -- hotkeys ----------------------------------------------------------------
 
     def on_capture_requested(self) -> None:
@@ -474,10 +540,41 @@ class OmniSightController(QObject):
             return
         try:
             self.recorder.start_recording()
+        except MicrophonePermissionError as exc:
+            self._error_actions = self._microphone_actions()
+            self.state.fail(str(exc))
+            return
         except AudioDeviceError as exc:
             self.state.fail(str(exc))
             return
         self.state.transition(AppState.RECORDING_VOICE, reason="Alt+V down")
+
+    # -- microphone permission ------------------------------------------------------
+
+    def _microphone_actions(self) -> list[tuple[str, Any]]:
+        return [("Open microphone settings", self.open_microphone_settings), ("Check again", self.recheck_microphone)]
+
+    def open_microphone_settings(self) -> None:
+        logger.info("opening %s", MIC_SETTINGS_URI)
+        QDesktopServices.openUrl(QUrl(MIC_SETTINGS_URI))
+
+    def recheck_microphone(self) -> None:
+        permission = microphone_permission()
+        logger.info("microphone permission re-checked: %s", permission)
+        if permission.startswith("denied"):
+            self.hud.show_error(
+                "Still blocked. " + PERMISSION_MESSAGES.get(permission, "Microphone access is off."),
+                self._microphone_actions(),
+            )
+            return
+        self.state.reset()
+        self.hud.set_idle()
+        self.hud.status_label.setText("Microphone access is on. Hold Alt+V and speak.")
+
+    def _on_tray_message_clicked(self) -> None:
+        if self._mic_notice_pending:
+            self._mic_notice_pending = False
+            self.open_microphone_settings()
 
     def on_voice_released(self) -> None:
         if self.state.state is not AppState.RECORDING_VOICE:
@@ -548,8 +645,9 @@ class OmniSightController(QObject):
         elif new is AppState.ANALYZING:
             self.hud.show_state(new, "Analyzing the screen…")
         elif new is AppState.ERROR:
+            actions, self._error_actions = self._error_actions, []
             self.hud.place_on_screen(None)
-            self.hud.show_error(self.state.last_error or "Something went wrong.")
+            self.hud.show_error(self.state.last_error or "Something went wrong.", actions)
         elif new is AppState.IDLE:
             self.hud.set_idle()
 
@@ -588,6 +686,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--override-url", help="talk to this node instead of discovering it from the gist")
     parser.add_argument("--log-level", default=None, choices=("DEBUG", "INFO", "WARNING", "ERROR"))
     parser.add_argument("--no-hotkeys", action="store_true", help="do not install the global keyboard hook")
+    parser.add_argument("--backend", choices=tuple(BACKENDS), help="auto, kaggle or local (overrides the saved choice)")
     args = parser.parse_args(argv)
 
     try:
@@ -612,6 +711,21 @@ def main(argv: list[str] | None = None) -> int:
     app.setOrganizationName("OmniSight")
     app.setApplicationVersion(CONTRACT_VERSION)
     app.setQuitOnLastWindowClosed(False)
+
+    # Precedence: --backend flag > choice saved from the tray/settings > OMNISIGHT_BACKEND > auto.
+    saved = QSettings()
+    saved_backend = str(saved.value("backend", "") or "")
+    saved_local = str(saved.value("local_url", "") or "")
+    try:
+        if args.backend:
+            settings = settings.with_backend(args.backend)
+        elif saved_backend in BACKENDS:
+            settings = settings.with_backend(saved_backend)
+        if saved_local:
+            settings = settings.with_local_url(saved_local)
+    except ValueError as exc:
+        logger.warning("ignoring saved settings: %s", exc)
+    logger.info("backend: %s (%s)", settings.backend, BACKENDS[settings.backend])
     if not QSystemTrayIcon.isSystemTrayAvailable():
         logger.warning("system tray unavailable; use the hotkeys")
 

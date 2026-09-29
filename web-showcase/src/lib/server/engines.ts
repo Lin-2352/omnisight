@@ -1,0 +1,145 @@
+// The three answer engines behind /api/fallback-infer. Node runtime only.
+import { createHash } from "node:crypto";
+
+import type { AnalyzeRequest, AnalyzeResponse } from "../contracts";
+import { deriveSummary, extractCodeBlocks } from "../markdown";
+import { presetBySha256 } from "../presets";
+import { SYSTEM_PROMPT, userText } from "./prompts";
+
+export const DEFAULT_FALLBACK_MODEL = "gemini-2.5-flash";
+
+export class EngineUnavailable extends Error {}
+
+/** A request the upstream node rejected as invalid; passed through instead of failing over. */
+export class UpstreamRejected extends Error {
+  constructor(
+    readonly status: number,
+    readonly body: unknown,
+  ) {
+    super(`upstream rejected the request with HTTP ${status}`);
+  }
+}
+
+function buildResponse(
+  request: AnalyzeRequest,
+  markdown: string,
+  source: AnalyzeResponse["source"],
+  modelId: string,
+  totalMs: number,
+  tokens: number,
+  confidence: number | null,
+  finishReason: AnalyzeResponse["finish_reason"] = "stop",
+): AnalyzeResponse {
+  const blocks = extractCodeBlocks(markdown);
+  const languages = blocks.map((block) => block.language).filter((language) => language !== "text");
+  const summary = deriveSummary(markdown) || (blocks.length ? `The answer consists of ${blocks.length} code block(s).` : "No answer was produced.");
+  return {
+    request_id: request.request_id ?? crypto.randomUUID(),
+    contract_version: "2.1.0",
+    model_id: modelId,
+    source,
+    summary,
+    markdown: markdown.slice(0, 65536),
+    code_blocks: blocks.slice(0, 50),
+    detected_language: languages[0] ?? null,
+    transcript: null,
+    confidence,
+    finish_reason: finishReason,
+    timings: {
+      queue_ms: 0,
+      // Non-streaming engines only know the total; first-token time is reported as the total.
+      ttft_ms: totalMs,
+      total_ms: totalMs,
+      tokens_generated: tokens,
+      tokens_per_sec: tokens > 0 && totalMs > 0 ? Math.round((tokens / (totalMs / 1000)) * 100) / 100 : 0,
+    },
+    created_utc: new Date().toISOString(),
+  };
+}
+
+// --- Tier 1: live Kaggle node --------------------------------------------------------------
+
+export async function analyzeWithNode(baseUrl: string, request: AnalyzeRequest, timeoutMs: number): Promise<AnalyzeResponse> {
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl}/v1/analyze`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+      signal: AbortSignal.timeout(timeoutMs),
+      cache: "no-store",
+    });
+  } catch (error) {
+    throw new EngineUnavailable(`node request failed (${error instanceof Error ? error.name : "error"})`);
+  }
+  if (response.status === 200) return (await response.json()) as AnalyzeResponse;
+  if ([400, 413, 422].includes(response.status)) {
+    throw new UpstreamRejected(response.status, await response.json().catch(() => null));
+  }
+  throw new EngineUnavailable(`node returned HTTP ${response.status}`);
+}
+
+// --- Tier 2: Gemini (Google AI Studio) -------------------------------------------------------
+
+interface GeminiResponse {
+  candidates?: { content?: { parts?: { text?: string }[] }; finishReason?: string }[];
+  usageMetadata?: { candidatesTokenCount?: number };
+}
+
+export async function analyzeWithGemini(request: AnalyzeRequest, apiKey: string, timeoutMs: number): Promise<AnalyzeResponse> {
+  const model = process.env.FALLBACK_MODEL || DEFAULT_FALLBACK_MODEL;
+  const base = (process.env.GEMINI_API_BASE || "https://generativelanguage.googleapis.com").replace(/\/+$/, "");
+  const parts: Record<string, unknown>[] = [{ inline_data: { mime_type: request.image.mime, data: request.image.data_b64 } }];
+  if (request.audio) parts.push({ inline_data: { mime_type: "audio/wav", data: request.audio.data_b64 } });
+  parts.push({ text: userText(request.mode ?? "explain", request.prompt ?? "") });
+  const started = Date.now();
+  let response: Response;
+  try {
+    response = await fetch(`${base}/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+        contents: [{ role: "user", parts }],
+        generationConfig: { temperature: request.temperature ?? 0.1, maxOutputTokens: request.max_new_tokens ?? 512 },
+      }),
+      signal: AbortSignal.timeout(timeoutMs),
+      cache: "no-store",
+    });
+  } catch (error) {
+    throw new EngineUnavailable(`gemini request failed (${error instanceof Error ? error.name : "error"})`);
+  }
+  if (!response.ok) throw new EngineUnavailable(`gemini returned HTTP ${response.status}`);
+  const payload = (await response.json()) as GeminiResponse;
+  const candidate = payload.candidates?.[0];
+  const text = (candidate?.content?.parts ?? []).map((part) => part.text ?? "").join("").trim();
+  if (!text) throw new EngineUnavailable("gemini returned no text");
+  const finish = candidate?.finishReason === "MAX_TOKENS" ? "length" : "stop";
+  return buildResponse(request, text, "gemini", model, Date.now() - started, payload.usageMetadata?.candidatesTokenCount ?? 0, null, finish);
+}
+
+// --- Tier 3: deterministic --------------------------------------------------------------------
+
+export function analyzeDeterministic(request: AnalyzeRequest, imageBytes: Buffer): { response: AnalyzeResponse; matched: string | null } {
+  const started = Date.now();
+  const digest = createHash("sha256").update(imageBytes).digest("hex");
+  const preset = presetBySha256(digest);
+  if (preset) {
+    return {
+      response: buildResponse(request, preset.markdown, "deterministic", `omnisight-demo/${preset.id}`, Date.now() - started, 0, 1),
+      matched: preset.id,
+    };
+  }
+  const markdown = [
+    "The live vision model is not reachable right now, so this custom screenshot could not be analyzed.",
+    "",
+    "The Kaggle GPU node sleeps between sessions, and the cloud fallback is unavailable for this deployment right now. Nothing about your screenshot was guessed.",
+    "",
+    "- Pick one of the four presets above to see a verified diagnosis instantly.",
+    "- Or check back when the status badge shows the Kaggle GPU online, then run it again.",
+  ].join("\n");
+  return {
+    response: buildResponse(request, markdown, "deterministic", "omnisight-demo/offline", Date.now() - started, 0, null),
+    matched: null,
+  };
+}

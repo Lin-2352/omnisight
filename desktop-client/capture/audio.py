@@ -40,6 +40,62 @@ class AudioDeviceError(RuntimeError):
     """The microphone could not be opened or failed mid-recording."""
 
 
+class MicrophonePermissionError(AudioDeviceError):
+    """Windows privacy settings block microphone access for this app."""
+
+    def __init__(self, permission: str) -> None:
+        super().__init__(PERMISSION_MESSAGES.get(permission, "Microphone access is blocked."))
+        self.permission = permission
+
+
+MIC_SETTINGS_URI: Final[str] = "ms-settings:privacy-microphone"
+_CONSENT_KEY: Final[str] = r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone"
+
+PERMISSION_MESSAGES: Final[dict[str, str]] = {
+    "denied_device": (
+        "Microphone access is turned off for this device. Open Settings and turn on "
+        "'Microphone access' (it may need an administrator), then press Check again."
+    ),
+    "denied_user": (
+        "Microphone access is turned off for your account. Open Settings and turn on "
+        "'Microphone access', then press Check again."
+    ),
+    "denied_desktop_apps": (
+        "Desktop apps are not allowed to use the microphone. Open Settings and turn on "
+        "'Let desktop apps access your microphone', then press Check again."
+    ),
+}
+
+
+def microphone_permission() -> str:
+    """Read Windows' microphone consent store (read-only).
+
+    Returns ``allowed``, ``denied_device`` (the device-wide switch), ``denied_user``,
+    ``denied_desktop_apps``, or ``unknown`` off Windows. Apps cannot grant
+    themselves access; only the user can, in Settings > Privacy & security > Microphone.
+    """
+    try:
+        import winreg
+    except ImportError:
+        return "unknown"
+
+    def value(root: int, path: str) -> str | None:
+        try:
+            with winreg.OpenKey(root, path) as key:
+                data, _ = winreg.QueryValueEx(key, "Value")
+                return str(data)
+        except OSError:
+            return None
+
+    if value(winreg.HKEY_LOCAL_MACHINE, _CONSENT_KEY) == "Deny":
+        return "denied_device"
+    if value(winreg.HKEY_CURRENT_USER, _CONSENT_KEY) == "Deny":
+        return "denied_user"
+    if value(winreg.HKEY_CURRENT_USER, _CONSENT_KEY + r"\NonPackaged") == "Deny":
+        return "denied_desktop_apps"
+    return "allowed"
+
+
 class NoSpeechError(RuntimeError):
     """The clip held no speech after silence trimming."""
 
@@ -160,8 +216,15 @@ class AudioRecorder:
             self._filled = min(self._capacity, self._filled + size)
 
     def start_recording(self) -> None:
-        """Open the microphone and start filling the ring buffer."""
+        """Open the microphone and start filling the ring buffer.
+
+        Raises ``MicrophonePermissionError`` when Windows privacy settings block access.
+        """
         import sounddevice as sd
+
+        permission = microphone_permission()
+        if permission.startswith("denied"):
+            raise MicrophonePermissionError(permission)
 
         with self._lock:
             if self._stream is not None:

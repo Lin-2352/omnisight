@@ -3,6 +3,7 @@
 Checks:
     1. screen-grab latency on every monitor (budget: <= 30 ms median);
     2. JPEG/base64 payload <= 350 KiB and contract-valid, incl. a worst-case noise image;
+    2b. black-frame detection (display off/asleep/locked) with retry, without rejecting dark UIs;
     3. endpoint discovery against a local fake GitHub gist API (TTL cache, ETag 304,
        offline/stale records, unreachable API, manual override);
     4. failover order and error handling against local stub nodes, and the
@@ -46,7 +47,14 @@ from PyQt6.QtGui import QGuiApplication  # noqa: E402
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
 from capture.audio import AudioDeviceError, AudioRecorder, NoSpeechError, process_pcm  # noqa: E402
-from capture.screen import MAX_B64_BYTES, ScreenCapturer, encode_image  # noqa: E402
+from capture.screen import (  # noqa: E402
+    BLACK_FRAME_RETRIES,
+    MAX_B64_BYTES,
+    BlackFrameError,
+    ScreenCapturer,
+    encode_image,
+    frame_stats,
+)
 from core.config import GIST_FILENAME, ClientSettings, EndpointResolver  # noqa: E402
 from core.logger import configure_logging  # noqa: E402
 from core.state import AppState, StateMachine  # noqa: E402
@@ -238,6 +246,69 @@ def _payload_budget() -> str:
     return (
         f"screen {result.payload_bytes / 1024:.0f} KB at q{result.jpeg_quality}/4:4:4; noise 2560x1440 -> "
         f"{len(worst.image_b64) / 1024:.0f} KB at q{worst.quality} subsampling={worst.subsampling}"
+    )
+
+
+class _FakeShot:
+    def __init__(self, image: Image.Image) -> None:
+        self.size = image.size
+        self.bgra = image.convert("RGBA").tobytes("raw", "BGRA")
+
+
+class _FakeScreen:
+    """Stands in for mss: serves a scripted sequence of frames and counts grabs."""
+
+    def __init__(self, frames: list[Image.Image]) -> None:
+        self.frames = frames
+        self.grabs = 0
+        self.monitors = [{"left": 0, "top": 0, "width": 640, "height": 360}] * 2
+
+    def grab(self, _monitor: dict[str, int]) -> _FakeShot:
+        frame = self.frames[min(self.grabs, len(self.frames) - 1)]
+        self.grabs += 1
+        return _FakeShot(frame)
+
+
+@check("2b. black-frame detection: black rejected, dark terminal accepted, retry then give up")
+def _black_frames() -> str:
+    black = Image.new("RGB", (640, 360), (0, 0, 0))
+    # A dark IDE/terminal: near-black background with dim text rows must still be sent.
+    terminal = Image.new("RGB", (640, 360), (12, 12, 16))
+    pixels = np.array(terminal)
+    for row in range(20, 340, 18):
+        pixels[row : row + 9, 16 : 16 + (row * 7) % 560] = (170, 178, 190)
+    terminal = Image.fromarray(pixels)
+    started = time.perf_counter()
+    black_stats, terminal_stats = frame_stats(black), frame_stats(terminal)
+    stats_ms = (time.perf_counter() - started) * 500.0
+    expect(black_stats.is_black, f"black frame not detected: {black_stats}")
+    expect(not terminal_stats.is_black, f"dark terminal misread as black: {terminal_stats}")
+
+    capturer = ScreenCapturer()
+    try:
+        waking = _FakeScreen([black, black, terminal])  # display waking up: two black frames, then content
+        capturer._sct = lambda: waking  # type: ignore[method-assign]
+        result = capturer.capture(monitor_index=1)
+        expect(waking.grabs == 3 and result.width > 0, f"recovery path grabbed {waking.grabs} frames")
+
+        dark = _FakeScreen([black])  # display off: every retry is black
+        capturer._sct = lambda: dark  # type: ignore[method-assign]
+        began = time.perf_counter()
+        try:
+            capturer.capture(monitor_index=1)
+        except BlackFrameError as exc:
+            message = str(exc)
+        else:
+            raise CheckFailure("an all-black screen was captured and would have been sent")
+        waited = (time.perf_counter() - began) * 1000.0
+        expect(dark.grabs == 1 + BLACK_FRAME_RETRIES, f"expected {1 + BLACK_FRAME_RETRIES} grabs, got {dark.grabs}")
+    finally:
+        del capturer._sct
+        capturer.close()
+    return (
+        f"black mean {black_stats.mean:.1f}/std {black_stats.std:.1f} -> rejected; terminal mean {terminal_stats.mean:.1f}/"
+        f"std {terminal_stats.std:.1f} -> sent; stats {stats_ms:.2f} ms/frame; waking display recovered on grab 3; "
+        f"display off -> BlackFrameError after {dark.grabs} grabs ({waited:.0f} ms): {message[:40]}..."
     )
 
 

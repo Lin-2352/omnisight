@@ -93,6 +93,20 @@ def _float(env: Mapping[str, str], name: str, default: float) -> float:
     return parsed
 
 
+BACKENDS: Final[dict[str, str]] = {
+    "auto": "Auto (Kaggle, then local GPU)",
+    "kaggle": "Kaggle cloud GPU",
+    "local": "Local GPU (this PC)",
+}
+
+
+def _backend(value: str) -> str:
+    choice = value.strip().lower()
+    if choice not in BACKENDS:
+        raise ValueError(f"OMNISIGHT_BACKEND must be one of {', '.join(BACKENDS)} (got {value!r})")
+    return choice
+
+
 @dataclass(frozen=True)
 class ClientSettings:
     gist_id: str = DEFAULT_GIST_ID
@@ -107,6 +121,9 @@ class ClientSettings:
     retries: int = 2
     max_new_tokens: int = 512
     log_level: str = "INFO"
+    #: Which inference backend to use: "auto" (Kaggle -> local GPU -> web fallback),
+    #: "kaggle" (Kaggle -> web fallback) or "local" (this PC's GPU node only).
+    backend: str = "auto"
 
     @classmethod
     def from_environment(cls, environ: Mapping[str, str] | None = None, *, load_files: bool = True) -> ClientSettings:
@@ -133,7 +150,16 @@ class ClientSettings:
             request_deadline_s=_float(env, "OMNISIGHT_REQUEST_DEADLINE_S", 120.0),
             max_new_tokens=max_new_tokens,
             log_level=(_first(env, "OMNISIGHT_LOG_LEVEL") or "INFO").upper(),
+            backend=_backend(_first(env, "OMNISIGHT_BACKEND") or "auto"),
         )
+
+    def with_backend(self, backend: str) -> ClientSettings:
+        """Copy with a different backend choice (auto / kaggle / local)."""
+        return replace(self, backend=_backend(backend))
+
+    def with_local_url(self, url: str) -> ClientSettings:
+        """Copy with a different local GPU node URL."""
+        return replace(self, local_dev_url=_url_or_none("local node URL", url.strip()) or LOCAL_DEV_URL)
 
     def with_override(self, url: str | None) -> ClientSettings:
         """Copy with a session override URL (empty or None clears it)."""

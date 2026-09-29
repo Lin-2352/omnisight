@@ -182,7 +182,13 @@ class InferenceClient:
         self._rng = rng or random.Random()
 
     def tiers(self) -> list[TierTarget]:
-        resolution = self.resolver.resolve_active_endpoint()
+        """Endpoints to try, in order, for the configured backend.
+
+        auto   : Kaggle (or override) -> local GPU node -> web fallback
+        kaggle : Kaggle (or override) -> web fallback
+        local  : local GPU node only
+        """
+        backend = self.settings.backend
         targets: list[TierTarget] = []
         seen: set[str] = set()
 
@@ -195,12 +201,15 @@ class InferenceClient:
                 return
             targets.append(TierTarget(tier, url))
 
-        if resolution.url and resolution.source in ("gist", "override"):
-            add("override" if resolution.source == "override" else "kaggle", resolution.url.rstrip("/") + ANALYZE_PATH)
-        elif resolution.source in ("fallback", "none"):
-            logger.info("gist endpoint unusable (%s)", resolution.detail or resolution.source)
-        add("local", self.settings.local_dev_url.rstrip("/") + ANALYZE_PATH)
-        if self.settings.fallback_api_url:
+        if backend in ("auto", "kaggle"):
+            resolution = self.resolver.resolve_active_endpoint()
+            if resolution.url and resolution.source in ("gist", "override"):
+                add("override" if resolution.source == "override" else "kaggle", resolution.url.rstrip("/") + ANALYZE_PATH)
+            elif resolution.source in ("fallback", "none"):
+                logger.info("gist endpoint unusable (%s)", resolution.detail or resolution.source)
+        if backend in ("auto", "local"):
+            add("local", self.settings.local_dev_url.rstrip("/") + ANALYZE_PATH)
+        if backend in ("auto", "kaggle") and self.settings.fallback_api_url:
             add("fallback", self.settings.fallback_api_url)
         return targets
 
@@ -241,6 +250,13 @@ class InferenceClient:
                 attempts=attempts,
             )
             return ClientResult(response=response, metrics=metrics)
+        if self.settings.backend == "local" and not failures:
+            raise InferenceError(
+                f"Local GPU node not running at {self.settings.local_dev_url} - start it with "
+                "scripts\\run-local-gpu.ps1 (or switch the backend to Kaggle in the tray menu)."
+            )
+        if self.settings.backend == "kaggle" and not failures:
+            raise InferenceError("The Kaggle node is offline and no web fallback is configured.")
         summary = "; ".join(failures) if failures else "no endpoint configured"
         raise InferenceError(f"every inference endpoint failed - {summary}")
 
