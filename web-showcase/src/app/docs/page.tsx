@@ -233,7 +233,8 @@ python desktop-client\\main.py            # --backend auto|kaggle|local`}</Code>
               </li>
               <li>
                 <strong className="text-ink">Gemini 2.5 Flash</strong>: used when the node is asleep and{" "}
-                <C>GEMINI_API_KEY</C> is set on the server (25 s timeout). The UI shows a cloud-fallback banner.
+                <C>GEMINI_API_KEY</C> is set on the server (25 s timeout). If it answers 503 (overloaded) or 429 (quota),
+                the request is retried once on Gemini 2.5 Flash-Lite. The UI shows a cloud-fallback banner.
               </li>
               <li>
                 <strong className="text-ink">Deterministic</strong>: preset screenshots are recognized by SHA-256 and get their

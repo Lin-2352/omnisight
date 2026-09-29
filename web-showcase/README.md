@@ -42,7 +42,7 @@ The response body is always a plain `AnalyzeResponse`, so the desktop client can
 | Variable | Scope | Purpose |
 | --- | --- | --- |
 | `GEMINI_API_KEY` | server | Enables the Gemini tier. Optional |
-| `FALLBACK_MODEL` | server | Defaults to `gemini-2.5-flash` |
+| `FALLBACK_MODEL` | server | Comma-separated models tried in order; defaults to `gemini-2.5-flash,gemini-2.5-flash-lite`. On a 503 or 429 the request is retried once on the next model |
 | `GITHUB_GIST_ID` | server | Defaults to the project gist |
 | `GITHUB_TOKEN` | server | Optional read-only token for gist reads (rate limit). Never the node's write token |
 | `NEXT_PUBLIC_REPO_URL`, `NEXT_PUBLIC_SITE_URL` | public | Links and metadata |

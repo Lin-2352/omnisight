@@ -7,6 +7,16 @@ import { presetBySha256 } from "../presets";
 import { SYSTEM_PROMPT, userText } from "./prompts";
 
 export const DEFAULT_FALLBACK_MODEL = "gemini-2.5-flash";
+/** Tried in order on 503/429; FALLBACK_MODEL may be a comma-separated list. */
+export const DEFAULT_FALLBACK_MODELS = "gemini-2.5-flash,gemini-2.5-flash-lite";
+
+export function geminiModels(): string[] {
+  const models = (process.env.FALLBACK_MODEL || DEFAULT_FALLBACK_MODELS)
+    .split(",")
+    .map((name) => name.trim())
+    .filter(Boolean);
+  return models.length ? models : [DEFAULT_FALLBACK_MODEL];
+}
 
 export class EngineUnavailable extends Error {}
 
@@ -107,39 +117,41 @@ export function geminiGenerationConfig(model: string, request: AnalyzeRequest): 
 }
 
 export async function analyzeWithGemini(request: AnalyzeRequest, apiKey: string, timeoutMs: number): Promise<AnalyzeResponse> {
-  const model = process.env.FALLBACK_MODEL || DEFAULT_FALLBACK_MODEL;
+  const models = geminiModels();
   const base = (process.env.GEMINI_API_BASE || "https://generativelanguage.googleapis.com").replace(/\/+$/, "");
   const parts: Record<string, unknown>[] = [{ inline_data: { mime_type: request.image.mime, data: request.image.data_b64 } }];
   if (request.audio) parts.push({ inline_data: { mime_type: "audio/wav", data: request.audio.data_b64 } });
   parts.push({ text: userText(request.mode ?? "explain", request.prompt ?? "") });
   const started = Date.now();
   const deadline = started + timeoutMs;
-  const body = JSON.stringify({
-    systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-    contents: [{ role: "user", parts }],
-    generationConfig: geminiGenerationConfig(model, request),
-  });
   let response: Response | undefined;
-  for (let attempt = 1; attempt <= GEMINI_ATTEMPTS; attempt += 1) {
+  let model = models[0] ?? DEFAULT_FALLBACK_MODEL;
+  for (let attempt = 0; attempt < GEMINI_ATTEMPTS; attempt += 1) {
+    // Retry on the next configured model when there is one: a 503 (overloaded) or 429 (per-model
+    // free-tier quota) on gemini-2.5-flash usually does not apply to gemini-2.5-flash-lite.
+    model = models[Math.min(attempt, models.length - 1)] ?? model;
     try {
       response = await fetch(`${base}/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
-        body,
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+          contents: [{ role: "user", parts }],
+          generationConfig: geminiGenerationConfig(model, request),
+        }),
         signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())),
         cache: "no-store",
       });
     } catch (error) {
       throw new EngineUnavailable(`gemini request failed (${error instanceof Error ? error.name : "error"})`);
     }
-    // 503 "model overloaded" is common and short-lived on Gemini; one quick retry usually succeeds.
     const retryable = response.status === 503 || response.status === 429;
-    if (!retryable || attempt === GEMINI_ATTEMPTS || deadline - Date.now() < GEMINI_RETRY_DELAY_MS + 5000) break;
-    console.warn(`gemini returned HTTP ${response.status}; retrying once`);
+    if (!retryable || attempt === GEMINI_ATTEMPTS - 1 || deadline - Date.now() < GEMINI_RETRY_DELAY_MS + 5000) break;
+    console.warn(`gemini ${model} returned HTTP ${response.status}; retrying`);
     await response.body?.cancel();
     await new Promise((resolve) => setTimeout(resolve, GEMINI_RETRY_DELAY_MS));
   }
-  if (!response?.ok) throw new EngineUnavailable(`gemini returned HTTP ${response?.status ?? "none"}`);
+  if (!response?.ok) throw new EngineUnavailable(`gemini ${model} returned HTTP ${response?.status ?? "none"}`);
   const payload = (await response.json()) as GeminiResponse;
   const candidate = payload.candidates?.[0];
   const text = (candidate?.content?.parts ?? []).map((part) => part.text ?? "").join("").trim();

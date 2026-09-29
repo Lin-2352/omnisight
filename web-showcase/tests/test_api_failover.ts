@@ -30,6 +30,7 @@ const state: {
   nodeAnalyzeCalls: number;
   geminiKeySeen: string | null;
   geminiThinkingBudget: number | null;
+  geminiModelsCalled: string[];
 } = {
   gist: "online",
   node: "ok",
@@ -38,6 +39,7 @@ const state: {
   nodeAnalyzeCalls: 0,
   geminiKeySeen: null,
   geminiThinkingBudget: null,
+  geminiModelsCalled: [],
 };
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
@@ -109,6 +111,7 @@ const gistStub = createServer((req, res) => {
 
 const geminiStub = createServer(async (req, res) => {
   state.geminiCalls += 1;
+  state.geminiModelsCalled.push(/\/models\/([^:]+):generateContent/.exec(req.url ?? "")?.[1] ?? "?");
   state.geminiKeySeen = (req.headers["x-goog-api-key"] as string | undefined) ?? null;
   const body = JSON.parse(await readBody(req)) as {
     contents?: { parts?: { inline_data?: { data?: string } }[] }[];
@@ -178,6 +181,7 @@ async function scenario(name: string, run: () => Promise<string>): Promise<void>
   state.geminiCalls = 0;
   state.nodeAnalyzeCalls = 0;
   state.geminiKeySeen = null;
+  state.geminiModelsCalled = [];
   try {
     const detail = await run();
     results.push({ name, ok: true, detail });
@@ -235,7 +239,7 @@ async function main(): Promise<number> {
     OMNISIGHT_ALLOW_LOOPBACK_NODE: "1",
     GEMINI_API_BASE: `http://127.0.0.1:${geminiPort}`,
     GEMINI_API_KEY: GEMINI_TEST_KEY,
-    FALLBACK_MODEL: "gemini-2.5-flash",
+    FALLBACK_MODEL: "gemini-2.5-flash,gemini-2.5-flash-lite",
   };
   const next = await startNext(env);
   console.log(`next start on ${base}; stubs: gist :${gistPort}, node :${nodePort}, gemini :${geminiPort}\n`);
@@ -295,14 +299,15 @@ async function main(): Promise<number> {
       return `(${r.ms} ms, trace ${r.trace})`;
     });
 
-    await scenario("4b. Gemini overloaded once (503) -> retried -> tier gemini", async () => {
+    await scenario("4b. gemini-2.5-flash overloaded (503) -> retried on flash-lite -> tier gemini", async () => {
       Object.assign(state, { gist: "offline", node: "ok", gemini: "flaky" });
       const r = await post(analyzeBody());
       assert.equal(r.status, 200, r.text);
       assert.equal(r.tier, "gemini");
-      assert.equal(state.geminiCalls, 2);
+      assert.deepEqual(state.geminiModelsCalled, ["gemini-2.5-flash", "gemini-2.5-flash-lite"]);
+      assert.equal(r.json.model_id, "gemini-2.5-flash-lite", "the response names the model that actually answered");
       assert.match(r.trace ?? "", /kaggle:offline;gemini:ok/);
-      return `(${r.ms} ms, trace ${r.trace})`;
+      return `(${r.ms} ms, models ${state.geminiModelsCalled.join(" -> ")})`;
     });
 
     await scenario("5. Everything down, custom image -> honest offline notice", async () => {
