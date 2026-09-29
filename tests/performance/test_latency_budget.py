@@ -52,10 +52,11 @@ def test_capture_and_compression_meet_the_latency_budget(make_capturer, screens:
 
 
 def test_black_frame_check_is_a_small_share_of_the_budget(screens: dict[str, Image.Image]) -> None:
-    # Measured ~1 ms on the dev laptop and ~2.4 ms on a GitHub Windows runner; the pipeline
-    # budget above is the real guard, this only catches an accidental full-resolution scan.
+    # Measured ~1 ms on the dev laptop and 2.4-6.1 ms on shared GitHub Windows runners (noisy).
+    # The pipeline budget above is the real guard; this only catches an accidental
+    # full-resolution scan, which costs 50+ ms.
     samples = timed(lambda: frame_stats(screens["1440p"]))
-    assert statistics.median(samples) <= 5.0
+    assert statistics.median(samples) <= 20.0
 
 
 def test_request_build_and_serialization_under_5_ms() -> None:
