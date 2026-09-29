@@ -412,7 +412,16 @@ def _engine_spec() -> str:
     gen_kwargs = {kw.arg for call in gen for kw in call.keywords}
     for key in ("max_new_tokens", "repetition_penalty", "max_time", "remove_invalid_values", "output_logits", "stopping_criteria"):
         expect(key in gen_kwargs, f"generate() missing {key}")
-    for needle in ("set_per_process_memory_fraction", "except torch.cuda.OutOfMemoryError", "gc.collect()", "torch.cuda.empty_cache()"):
+    for needle in (
+        "set_per_process_memory_fraction",
+        "except torch.cuda.OutOfMemoryError",
+        "gc.collect()",
+        "torch.cuda.empty_cache()",
+        # Regression guard: a 4-bit vision tower reports uint8 storage as its dtype,
+        # which transformers uses to cast pixel values (blind model on Kaggle).
+        "_fix_vision_input_dtype(model)",
+        "visual.get_dtype = lambda: torch.float16",
+    ):
         expect(needle in source, f"engine.py lacks {needle!r}")
     return "NF4 + double quant + fp16, pixel bounds, single device, OOM breaker, 512/0.1/1.1"
 

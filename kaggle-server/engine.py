@@ -241,9 +241,7 @@ class QwenVisionEngine:
             bnb_4bit_quant_type="nf4",
             bnb_4bit_use_double_quant=True,
             bnb_4bit_compute_dtype=torch.float16,
-            # None keeps transformers' default exclusions (lm_head stays fp16); an empty
-            # list quantizes lm_head too, trading output quality for ~0.8 GB.
-            llm_int8_skip_modules=[] if self.settings.quantize_lm_head else None,
+            llm_int8_skip_modules=self._skip_modules(),
         )
         logger.info("loading processor for %s", self.settings.model_id)
         self._processor = AutoProcessor.from_pretrained(
@@ -263,6 +261,7 @@ class QwenVisionEngine:
             token=token,
         )
         model.eval()
+        self._fix_vision_input_dtype(model)
         generation_config = model.generation_config
         eos = generation_config.eos_token_id
         eos_ids = [eos] if isinstance(eos, int) else list(eos or [])
@@ -276,6 +275,30 @@ class QwenVisionEngine:
             else self._processor.tokenizer.pad_token_id
         )
         self._model = model
+
+    def _skip_modules(self) -> list[str]:
+        """Modules kept in fp16. An explicit list replaces transformers' default (lm_head only)."""
+        skip = [] if self.settings.quantize_lm_head else ["lm_head"]
+        if not self.settings.quantize_vision:
+            skip.append("visual")
+        return skip
+
+    @staticmethod
+    def _fix_vision_input_dtype(model: Qwen2VLForConditionalGeneration) -> None:
+        """Keep pixel values in fp16 when the vision tower is 4-bit quantized.
+
+        transformers 4.49 casts pixels with ``pixel_values.type(self.visual.get_dtype())``,
+        and ``get_dtype`` returns the dtype of ``blocks[0].mlp.fc2.weight``. For a
+        bitsandbytes Linear4bit that is the packed storage dtype ``torch.uint8``, which
+        truncates the normalized pixels to integers and blinds the model.
+        """
+        visual = model.visual
+        reported = visual.get_dtype()
+        if not reported.is_floating_point:
+            visual.get_dtype = lambda: torch.float16  # type: ignore[method-assign]
+            logger.info("vision tower is quantized (storage %s); pixel input dtype pinned to float16", reported)
+        if not visual.get_dtype().is_floating_point:
+            raise RuntimeError(f"vision input dtype is {visual.get_dtype()}, expected a floating dtype")
 
     def _ensure_asr(self) -> None:
         with self._asr_lock:

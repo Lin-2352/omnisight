@@ -59,6 +59,7 @@ class ServerSettings(BaseModel):
     asr_preload: bool = False
     hf_token: SecretStr | None = None
     quantize_lm_head: bool = False
+    quantize_vision: bool = True
 
     # --- HTTP server --------------------------------------------------------------
     host: str = "127.0.0.1"
@@ -158,6 +159,11 @@ class ServerSettings(BaseModel):
             "quantize_lm_head",
             _parse_bool("OMNISIGHT_QUANTIZE_LM_HEAD", get("OMNISIGHT_QUANTIZE_LM_HEAD")),
         )
+        _put(
+            raw,
+            "quantize_vision",
+            _parse_bool("OMNISIGHT_QUANTIZE_VISION", get("OMNISIGHT_QUANTIZE_VISION")),
+        )
         _put(raw, "host", get("OMNISIGHT_HOST"))
         _put(raw, "port", get("OMNISIGHT_PORT"))
         _put(raw, "api_key", get("OMNISIGHT_API_KEY"))
@@ -205,6 +211,7 @@ class ServerSettings(BaseModel):
             "baseline_budget_gb": self.baseline_budget_gb,
             "pixels": f"{self.min_pixels}..{self.max_pixels}",
             "quantize_lm_head": self.quantize_lm_head,
+            "quantize_vision": self.quantize_vision,
             "tunnel_protocol": self.tunnel_protocol,
         }
 
