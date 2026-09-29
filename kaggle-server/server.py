@@ -282,11 +282,10 @@ def create_app(engine: InferenceEngine, settings: ServerSettings) -> FastAPI:
 
     @app.exception_handler(StarletteHTTPException)
     async def _http_error(request: Request, exc: StarletteHTTPException) -> JSONResponse:
-        body = ErrorResponse(
-            error_code=ErrorCode.INVALID_PAYLOAD,
-            message=str(exc.detail),
-            retryable=False,
+        code = {404: ErrorCode.NOT_FOUND, 405: ErrorCode.METHOD_NOT_ALLOWED}.get(
+            exc.status_code, ErrorCode.INVALID_PAYLOAD
         )
+        body = ErrorResponse(error_code=code, message=str(exc.detail), retryable=False)
         return JSONResponse(status_code=exc.status_code, content=body.model_dump(mode="json"), headers=exc.headers)
 
     @app.exception_handler(Exception)

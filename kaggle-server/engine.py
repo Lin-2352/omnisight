@@ -541,18 +541,18 @@ class QwenVisionEngine:
             status = "degraded"
             detail = f"model failed to load: {self._load_error}"
         else:
+            # "degraded" is reserved for conditions that can affect requests right now;
+            # static facts (baseline over budget) are reported as warnings with status "ok".
             status = "ok"
-            problems: list[str] = []
-            if self._baseline_bytes is not None and self._baseline_bytes > self.settings.baseline_budget_bytes:
-                problems.append(
-                    f"baseline {self._baseline_bytes / MB:.0f} MB exceeds the "
-                    f"{self.settings.baseline_budget_bytes / MB:.0f} MB budget"
-                )
             if self._last_oom_at is not None and time.monotonic() - self._last_oom_at < OOM_DEGRADED_WINDOW_S:
-                problems.append("CUDA out-of-memory within the last 60 s")
-            if problems:
                 status = "degraded"
-                detail = "; ".join(problems)
+                detail = "CUDA out-of-memory within the last 60 s"
+        warnings: list[str] = []
+        if self._baseline_bytes is not None and self._baseline_bytes > self.settings.baseline_budget_bytes:
+            warnings.append(
+                f"baseline {self._baseline_bytes / MB:.0f} MB exceeds the "
+                f"{self.settings.baseline_budget_bytes / MB:.0f} MB budget"
+            )
 
         cc = self._compute_capability
         return HealthResponse(
@@ -575,6 +575,7 @@ class QwenVisionEngine:
             queue_depth=queue_depth,
             oom_events=self._oom_events,
             detail=detail,
+            warnings=warnings,
             uptime_s=round(uptime_s, 1),
         )
 

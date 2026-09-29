@@ -283,7 +283,7 @@ def error_of(response: requests.Response | Any) -> oc.ErrorResponse:
 # ---------------------------------------------------------------------------
 
 
-@check("phase1", "verify_phase1.py passes against contract 2.0.0")
+@check("phase1", "verify_phase1.py passes against the current contract")
 def _phase1() -> str:
     result = subprocess.run(
         [sys.executable, str(REPO_ROOT / "scripts" / "verify_phase1.py")],
@@ -291,7 +291,7 @@ def _phase1() -> str:
     )
     tail = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else ""
     expect(result.returncode == 0, f"verify_phase1 failed:\n{result.stdout[-2500:]}{result.stderr[-1000:]}")
-    expect(oc.CONTRACT_VERSION == "2.0.0", f"contract version is {oc.CONTRACT_VERSION}")
+    expect(oc.CONTRACT_VERSION == "2.1.0", f"contract version is {oc.CONTRACT_VERSION}")
     return tail
 
 
@@ -420,6 +420,8 @@ def _engine_spec() -> str:
         # Regression guard: a 4-bit vision tower reports uint8 storage as its dtype,
         # which transformers uses to cast pixel values (blind model on Kaggle).
         "_fix_vision_input_dtype(model)",
+        # Static budget overshoot is a warning, not a degraded status (verify finding).
+        "warnings=warnings",
         "visual.get_dtype = lambda: torch.float16",
     ):
         expect(needle in source, f"engine.py lacks {needle!r}")
@@ -490,7 +492,7 @@ def _http_success() -> str:
         expect(len(generated) == 36, "server must mint a request id")
         health = oc.HealthResponse.model_validate(client.get("/v1/health").json())
         expect(health.status == "ok" and health.queue_depth == 0, "health ok")
-        expect(client.get("/").json()["contract_version"] == "2.0.0", "root descriptor")
+        expect(client.get("/").json()["contract_version"] == oc.CONTRACT_VERSION, "root descriptor")
         expect(client.get("/docs").status_code == 404, "docs must be disabled by default")
         voice = request_body(mode="voice_query", prompt="", audio=audio_payload().model_dump())
         spoken = client.post("/v1/analyze", json=voice)
@@ -587,8 +589,10 @@ def _http_errors() -> str:
         crash = client.post("/v1/analyze", json=request_body())
         expect(crash.status_code == 500 and "secret" not in crash.text, "500 must not leak internals")
         missing = client.get("/nope")
-        expect(missing.status_code == 404 and error_of(missing).error_code == oc.ErrorCode.INVALID_PAYLOAD, "404 body")
-    return "every error path returns ErrorResponse with the mapped status"
+        expect(missing.status_code == 404 and error_of(missing).error_code == oc.ErrorCode.NOT_FOUND, "404 body")
+        wrong_method = client.get("/v1/analyze")
+        expect(wrong_method.status_code == 405 and error_of(wrong_method).error_code == oc.ErrorCode.METHOD_NOT_ALLOWED, "405 body")
+    return "every error path (incl. 404/405) returns ErrorResponse with the mapped status"
 
 
 @check("http", "CORS preflight and origin allowlist")

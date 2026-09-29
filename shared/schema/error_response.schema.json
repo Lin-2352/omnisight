@@ -11,7 +11,9 @@
         "inference_timeout",
         "upstream_unavailable",
         "rate_limited",
-        "internal_error"
+        "internal_error",
+        "not_found",
+        "method_not_allowed"
       ],
       "title": "ErrorCode",
       "type": "string"
@@ -74,6 +76,6 @@
   ],
   "title": "ErrorResponse",
   "type": "object",
-  "x-contract-version": "2.0.0",
+  "x-contract-version": "2.1.0",
   "x-generated-by": "omnisight_contracts.export_schema (do not edit by hand)"
 }

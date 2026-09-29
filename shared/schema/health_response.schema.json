@@ -48,7 +48,7 @@
       "title": "Compute Capability"
     },
     "contract_version": {
-      "default": "2.0.0",
+      "default": "2.1.0",
       "title": "Contract Version",
       "type": "string"
     },
@@ -163,6 +163,15 @@
       "minimum": 0.0,
       "title": "Vram Total Mb",
       "type": "number"
+    },
+    "warnings": {
+      "description": "Static conditions that do not affect serving (e.g. baseline VRAM over budget).",
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 20,
+      "title": "Warnings",
+      "type": "array"
     }
   },
   "required": [
@@ -178,6 +187,6 @@
   ],
   "title": "HealthResponse",
   "type": "object",
-  "x-contract-version": "2.0.0",
+  "x-contract-version": "2.1.0",
   "x-generated-by": "omnisight_contracts.export_schema (do not edit by hand)"
 }

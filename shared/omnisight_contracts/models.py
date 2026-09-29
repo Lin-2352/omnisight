@@ -35,7 +35,7 @@ from pydantic import (
     model_validator,
 )
 
-CONTRACT_VERSION: Final[str] = "2.0.0"
+CONTRACT_VERSION: Final[str] = "2.1.0"
 
 #: Decoded byte budget for a single screenshot (350 KiB).
 MAX_IMAGE_BYTES: Final[int] = 350 * 1024
@@ -90,6 +90,8 @@ class ErrorCode(str, Enum):
     UPSTREAM_UNAVAILABLE = "upstream_unavailable"
     RATE_LIMITED = "rate_limited"
     INTERNAL_ERROR = "internal_error"
+    NOT_FOUND = "not_found"
+    METHOD_NOT_ALLOWED = "method_not_allowed"
 
 
 #: HTTP status the inference node returns for each error code.
@@ -103,6 +105,8 @@ ERROR_HTTP_STATUS: Final[dict[ErrorCode, int]] = {
     ErrorCode.UPSTREAM_UNAVAILABLE: 502,
     ErrorCode.RATE_LIMITED: 429,
     ErrorCode.INTERNAL_ERROR: 500,
+    ErrorCode.NOT_FOUND: 404,
+    ErrorCode.METHOD_NOT_ALLOWED: 405,
 }
 
 
@@ -411,6 +415,11 @@ class HealthResponse(_ResponseModel):
     queue_depth: int = Field(default=0, ge=0)
     oom_events: int = Field(default=0, ge=0)
     detail: str | None = Field(default=None, max_length=2000)
+    warnings: list[str] = Field(
+        default_factory=list,
+        max_length=20,
+        description="Static conditions that do not affect serving (e.g. baseline VRAM over budget).",
+    )
     uptime_s: float = Field(ge=0.0)
     server_time_utc: AwareDatetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 

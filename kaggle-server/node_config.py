@@ -56,7 +56,7 @@ class ServerSettings(BaseModel):
     # --- Models -------------------------------------------------------------------
     model_id: str = "Qwen/Qwen2-VL-7B-Instruct"
     asr_model_id: str = "openai/whisper-base"
-    asr_preload: bool = False
+    asr_preload: bool = True
     hf_token: SecretStr | None = None
     quantize_lm_head: bool = False
     quantize_vision: bool = True

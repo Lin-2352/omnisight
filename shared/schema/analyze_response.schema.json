@@ -88,7 +88,7 @@
       "title": "Confidence"
     },
     "contract_version": {
-      "default": "2.0.0",
+      "default": "2.1.0",
       "title": "Contract Version",
       "type": "string"
     },
@@ -178,6 +178,6 @@
   ],
   "title": "AnalyzeResponse",
   "type": "object",
-  "x-contract-version": "2.0.0",
+  "x-contract-version": "2.1.0",
   "x-generated-by": "omnisight_contracts.export_schema (do not edit by hand)"
 }

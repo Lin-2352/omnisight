@@ -422,7 +422,7 @@ def _request_roundtrip() -> str:
     again = oc.AnalyzeRequest.model_validate_json(request.model_dump_json())
     expect(again == request, "JSON round-trip changed the request")
     expect(request.max_new_tokens == 512 and request.temperature == 0.1, "defaults changed")
-    expect(oc.CONTRACT_VERSION == "2.0.0", f"unexpected contract version {oc.CONTRACT_VERSION}")
+    expect(oc.CONTRACT_VERSION == "2.1.0", f"unexpected contract version {oc.CONTRACT_VERSION}")
     return f"request_id={str(request.request_id)[:8]}…"
 
 
@@ -491,6 +491,7 @@ def _responses() -> str:
     expect_invalid("bad finish_reason", lambda: oc.AnalyzeResponse.model_validate(response_dict(finish_reason="crash")), "finish_reason")
     expect_invalid("confidence > 1", lambda: oc.AnalyzeResponse.model_validate(response_dict(confidence=1.5)), "confidence")
     expect(oc.ERROR_HTTP_STATUS[oc.ErrorCode.GPU_OOM] == 507, "GPU_OOM must map to HTTP 507")
+    expect(oc.ERROR_HTTP_STATUS[oc.ErrorCode.NOT_FOUND] == 404 and oc.ERROR_HTTP_STATUS[oc.ErrorCode.METHOD_NOT_ALLOWED] == 405, "404/405 codes")
     expect(set(oc.ERROR_HTTP_STATUS) == set(oc.ErrorCode), "every ErrorCode needs an HTTP status")
     expect_invalid("ttft > total", lambda: oc.AnalyzeResponse.model_validate(
         response_dict(timings={"ttft_ms": 5000, "total_ms": 10, "tokens_generated": 1, "tokens_per_sec": 1})), "ttft_ms")
@@ -504,6 +505,8 @@ def _responses() -> str:
         vram_reserved_mb=6100.0, vram_total_mb=15095.0, uptime_s=12.5,
     )
     expect(health.status == "ok", "health")
+    expect(health.warnings == [], "warnings default to an empty list")
+    expect(oc.HealthResponse.model_validate({**health.model_dump(), "warnings": ["baseline 5974 MB exceeds the 5800 MB budget"]}).status == "ok", "ok + warnings")
     expect_invalid("ok without model", lambda: oc.HealthResponse.model_validate(
         {**health.model_dump(), "model_loaded": False}), "model_loaded")
     expect_invalid("allocated > total", lambda: oc.HealthResponse.model_validate(
