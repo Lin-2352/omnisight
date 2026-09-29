@@ -89,7 +89,7 @@ Alt+C and Alt+V are consumed system-wide, so the focused app never receives them
 - **Encode (resize + JPEG):**
   - With a box pre-reduction plus HAMMING: about 8 ms at 2560×1440, 9 ms at 4K, and 16 ms for the whole 1080p capture pipeline. It was 34–57 ms with a plain LANCZOS resize.
   - 10 pt code text keeps SSIM ≥ 0.98 against the LANCZOS result.
-  - Payloads were 60–230 KB for real screens, and 263 KB for a worst-case noise image after the quality ladder.
+  - Payloads were 60–230 KB for real screens (about 12% larger since JPEG Huffman optimization was dropped to save ~2.5 ms), and under 300 KB for a worst-case noise image after the quality ladder.
 - **Microphone:** requires Windows Settings → Privacy & security → Microphone, with both toggles on. Otherwise the HUD shows the permission card described above.
 - **Black-frame check:** 0.13–1.3 ms per frame. A display that stays off raises the error after 4 grabs (about 0.46 s).
 - **Local GPU backend (RTX 4060 Laptop 8 GB, Qwen2-VL-2B NF4):**

@@ -253,7 +253,9 @@ def encode_image(
         for quality, subsampling in _LADDER:
             buffer = io.BytesIO()
             try:
-                working.save(buffer, format="JPEG", quality=quality, optimize=True, subsampling=subsampling)
+                # optimize=False: Huffman-table optimization costs ~2.5 ms per capture (~5 ms on
+                # slower CPUs) for ~12% fewer bytes; pixels are identical either way.
+                working.save(buffer, format="JPEG", quality=quality, optimize=False, subsampling=subsampling)
                 encoded = base64.b64encode(buffer.getbuffer()).decode("ascii")
             finally:
                 buffer.close()
