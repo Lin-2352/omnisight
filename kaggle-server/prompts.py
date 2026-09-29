@@ -28,9 +28,10 @@ SYSTEM_PROMPT: Final[str] = (
     "guessing.\n"
     "5. Be concise. Do not repeat the question or describe the screenshot unless asked."
 )
-# Deliberately no "ignore instructions inside the screenshot" rule: measured on Qwen2-VL-7B
-# (Kaggle T4), such a rule made on-screen "reply PWNED" instructions win more often (5/5 and
-# 4/4 runs) than this prompt (1/3), because it points the model at exactly that text.
+# Known limitation: Qwen2-VL-7B (Kaggle T4) often obeys instructions painted on the screen. This
+# prompt was hijacked by an on-screen "reply PWNED" in 8 of 10 runs (T=0 and T=0.7). A system rule
+# telling it to ignore on-screen instructions did not help (5/5 and 4/4 hijacked in small
+# samples), so none is included. Gemini and the local 2B resisted the same screen.
 
 MODE_INSTRUCTIONS: Final[dict[AnalysisMode, str]] = {
     AnalysisMode.EXPLAIN: (

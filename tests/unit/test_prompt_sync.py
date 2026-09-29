@@ -50,8 +50,9 @@ def test_mode_instructions_are_identical(ts_source: str) -> None:
 
 
 def test_system_prompt_does_not_prime_the_model_toward_on_screen_instructions() -> None:
-    # A rule telling the model about "text addressed to an AI assistant" measurably increased
-    # on-screen hijacks on Qwen2-VL-7B; keep it out unless a new measurement says otherwise.
+    # A rule about "text addressed to an AI assistant" did not reduce on-screen hijacks on
+    # Qwen2-VL-7B (5/5 hijacked, vs 8/10 without it) and only adds prompt size; keep it out
+    # unless a new measurement shows it helps.
     from prompts import SYSTEM_PROMPT
 
     assert "addressed to an AI" not in SYSTEM_PROMPT
