@@ -17,6 +17,7 @@ The GPU inference node. It runs in a Kaggle notebook (GPU T4 or P100) and serves
 | `keep_alive.py` | Anti-idle daemon thread (GPU matmul when idle, else numpy) | optional |
 | `benchmark.py` | Synthetic TTFT, tokens/sec and VRAM report with PASS/FAIL against the SLAs | in-process mode only |
 | `node_config.py` | `ServerSettings` from env vars and Kaggle Secrets | no |
+| `diagnose_vision.py` | Loads one quantization variant and checks that OCR and debug answers contain on-screen text | yes |
 | `requirements-kaggle.txt` | Pinned stack for Kaggle Linux (Python 3.10–3.12) | – |
 
 ## Run on Kaggle
@@ -28,6 +29,24 @@ The GPU inference node. It runs in a Kaggle notebook (GPU T4 or P100) and serves
    - `OMNISIGHT_GIST_ID`.
    - Optional: `OMNISIGHT_API_KEY` and `HF_TOKEN`.
 3. Set `REPO_URL` in the second cell, then run all cells. The last cell keeps running while the node serves. Interrupt it to publish `offline` and stop.
+
+## Measured on Kaggle (Tesla T4, 2026-09-29)
+
+| Metric | Target | Measured | Verdict |
+| --- | --- | --- | --- |
+| Time to first token, median | ≤ 950 ms | 3297 ms (n=36) | FAIL |
+| Decode throughput, median | ≥ 25 tok/s | 14.3 tok/s (n=36) | FAIL |
+| Baseline VRAM | ≤ 5800 MB | 5974 MB | FAIL (+174 MB) |
+| Peak VRAM under generation | ≤ 11000 MB | 7475 MB | PASS |
+| Screen reading (4 OCR/debug probes) | 4/4 | 4/4, OCR confidence 0.98 | PASS |
+
+- **Speed and memory:** these come from the full 36-run benchmark. Speed was the same after the vision fix: 2.7–3.2 s to first token and 14.8–16.4 tok/s across the diagnosis probes.
+- **Vision fix:** with the vision tower in NF4, transformers 4.49 casts pixels to the packed `uint8` storage dtype. `engine.py` pins the vision input to fp16, which fixes it.
+- **Other checks:**
+  - graceful `offline` publishing works
+  - the gist heartbeat stayed live for about 1.7 hours
+  - keep-alive ticked every ~3 minutes throughout that session
+- **What would hit the speed targets:** a faster 4-bit format (for example AWQ kernels), which is a change to the spec.
 
 ## Gist record (public)
 
