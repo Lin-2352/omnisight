@@ -86,6 +86,9 @@ interface GeminiResponse {
   usageMetadata?: { candidatesTokenCount?: number };
 }
 
+const GEMINI_ATTEMPTS = 2;
+const GEMINI_RETRY_DELAY_MS = 800;
+
 /** Extra output budget for models whose thinking cannot be turned off (it counts against maxOutputTokens). */
 const THINKING_HEADROOM_TOKENS = 2048;
 
@@ -110,23 +113,33 @@ export async function analyzeWithGemini(request: AnalyzeRequest, apiKey: string,
   if (request.audio) parts.push({ inline_data: { mime_type: "audio/wav", data: request.audio.data_b64 } });
   parts.push({ text: userText(request.mode ?? "explain", request.prompt ?? "") });
   const started = Date.now();
-  let response: Response;
-  try {
-    response = await fetch(`${base}/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
-      body: JSON.stringify({
-        systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-        contents: [{ role: "user", parts }],
-        generationConfig: geminiGenerationConfig(model, request),
-      }),
-      signal: AbortSignal.timeout(timeoutMs),
-      cache: "no-store",
-    });
-  } catch (error) {
-    throw new EngineUnavailable(`gemini request failed (${error instanceof Error ? error.name : "error"})`);
+  const deadline = started + timeoutMs;
+  const body = JSON.stringify({
+    systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+    contents: [{ role: "user", parts }],
+    generationConfig: geminiGenerationConfig(model, request),
+  });
+  let response: Response | undefined;
+  for (let attempt = 1; attempt <= GEMINI_ATTEMPTS; attempt += 1) {
+    try {
+      response = await fetch(`${base}/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+        body,
+        signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())),
+        cache: "no-store",
+      });
+    } catch (error) {
+      throw new EngineUnavailable(`gemini request failed (${error instanceof Error ? error.name : "error"})`);
+    }
+    // 503 "model overloaded" is common and short-lived on Gemini; one quick retry usually succeeds.
+    const retryable = response.status === 503 || response.status === 429;
+    if (!retryable || attempt === GEMINI_ATTEMPTS || deadline - Date.now() < GEMINI_RETRY_DELAY_MS + 5000) break;
+    console.warn(`gemini returned HTTP ${response.status}; retrying once`);
+    await response.body?.cancel();
+    await new Promise((resolve) => setTimeout(resolve, GEMINI_RETRY_DELAY_MS));
   }
-  if (!response.ok) throw new EngineUnavailable(`gemini returned HTTP ${response.status}`);
+  if (!response?.ok) throw new EngineUnavailable(`gemini returned HTTP ${response?.status ?? "none"}`);
   const payload = (await response.json()) as GeminiResponse;
   const candidate = payload.candidates?.[0];
   const text = (candidate?.content?.parts ?? []).map((part) => part.text ?? "").join("").trim();

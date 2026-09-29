@@ -20,7 +20,7 @@ const UUID = "3f2b8c1e-4d5a-4b6c-8d7e-9f0a1b2c3d4e";
 
 type GistMode = "online" | "stale" | "offline" | "missing";
 type NodeMode = "ok" | "hang" | "loading" | "reject";
-type GeminiMode = "ok" | "down";
+type GeminiMode = "ok" | "down" | "flaky";
 
 const state: {
   gist: GistMode;
@@ -115,7 +115,9 @@ const geminiStub = createServer(async (req, res) => {
     generationConfig?: { maxOutputTokens?: number; thinkingConfig?: { thinkingBudget?: number } };
   };
   state.geminiThinkingBudget = body.generationConfig?.thinkingConfig?.thinkingBudget ?? null;
-  if (state.gemini === "down") return sendJson(res, 503, { error: { code: 503, message: "overloaded" } });
+  if (state.gemini === "down" || (state.gemini === "flaky" && state.geminiCalls === 1)) {
+    return sendJson(res, 503, { error: { code: 503, message: "The model is overloaded. Please try again later." } });
+  }
   assert.ok(body.contents?.[0]?.parts?.[0]?.inline_data?.data, "gemini stub: image must be sent inline");
   sendJson(res, 200, {
     candidates: [
@@ -288,8 +290,18 @@ async function main(): Promise<number> {
       assert.equal(r.json.model_id, "omnisight-demo/numpy-indexerror");
       assert.match(String(r.json.markdown), /enumerate\(scores, start=1\)/);
       assert.equal(state.nodeAnalyzeCalls, 0, "an offline node must not be called");
-      assert.equal(state.geminiCalls, 1);
+      assert.equal(state.geminiCalls, 2, "a 503 from Gemini is retried exactly once");
       assert.match(r.trace ?? "", /kaggle:offline;gemini:failed;deterministic:numpy-indexerror/);
+      return `(${r.ms} ms, trace ${r.trace})`;
+    });
+
+    await scenario("4b. Gemini overloaded once (503) -> retried -> tier gemini", async () => {
+      Object.assign(state, { gist: "offline", node: "ok", gemini: "flaky" });
+      const r = await post(analyzeBody());
+      assert.equal(r.status, 200, r.text);
+      assert.equal(r.tier, "gemini");
+      assert.equal(state.geminiCalls, 2);
+      assert.match(r.trace ?? "", /kaggle:offline;gemini:ok/);
       return `(${r.ms} ms, trace ${r.trace})`;
     });
 
