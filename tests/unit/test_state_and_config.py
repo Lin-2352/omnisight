@@ -309,3 +309,17 @@ def test_default_log_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Non
     monkeypatch.delenv("APPDATA")
     assert client_logger.default_log_dir() == Path.home() / ".omnisight" / "logs"
     assert sys.platform  # keep the module import meaningful on every platform
+
+
+def test_debug_logging_keeps_urllib3_quiet_so_a_request_line_never_carries_a_search_query(
+    tmp_path: Path, restore_omnisight_logger: logging.Logger
+) -> None:
+    urllib3_logger = logging.getLogger("urllib3")
+    before = urllib3_logger.level
+    try:
+        urllib3_logger.setLevel(logging.DEBUG)
+        client_logger.configure_logging("DEBUG", log_dir=tmp_path, console=False)
+        assert urllib3_logger.level == logging.WARNING
+        assert restore_omnisight_logger.level == logging.DEBUG and restore_omnisight_logger.propagate is False
+    finally:
+        urllib3_logger.setLevel(before)

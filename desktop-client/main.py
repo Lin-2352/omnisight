@@ -488,6 +488,7 @@ class OmniSightController(QObject):
         self._search_enabled = bool(saved.value("web_search", False, type=bool))
         self._smart_enabled = bool(saved.value("smart_query", False, type=bool)) and self._search_enabled
         self._search_token = 0
+        self._chat_sent = -1  # the search token whose chat request has already gone out
         self._search_pending = False
         self._search_worker: SearchWorker | None = None
         self._search_outcome: SearchOutcome | None = None
@@ -791,8 +792,9 @@ class OmniSightController(QObject):
     def _start_search(self, text: str, *, voice: bool = False) -> None:
         """Search for the typed question while the screen is captured (or the user speaks).
 
-        Only the typed question is ever a query. A spoken question has no text yet, so the cloud tier is
-        asked to ground itself instead (``web_search``), and so is a question whose search found nothing.
+        Only the typed question is ever a query. A spoken question has no text, so it is not searched.
+        Asking the cloud tier to ground itself (``web_search``) lets Gemini write its own queries from
+        the whole prompt, screen included, so that happens only when the user turned Smart query on.
         """
         self._search_token += 1
         self._search_outcome = None
@@ -803,7 +805,7 @@ class OmniSightController(QObject):
             return
         typed = text.strip()
         if not typed:
-            self._web_search_flag = voice
+            self._web_search_flag = voice and self._smart_enabled
             return
         self._search_pending = True
         ask = self._ask_engine if self._smart_enabled else None
@@ -821,7 +823,10 @@ class OmniSightController(QObject):
 
     def _ask_engine(self, prompt: str) -> str:
         """One short chat call for the smart query. Never uses the web tier: the rewrite stays on Kaggle or this PC."""
-        client = InferenceClient(dataclasses.replace(self.settings, fallback_api_url=None), self.resolver)
+        bounded = dataclasses.replace(
+            self.settings, fallback_api_url=None, request_deadline_s=20.0, read_timeout_s=15.0, local_timeout_s=20.0, retries=0
+        )
+        client = InferenceClient(bounded, self.resolver)
         request = build_request(None, mode=AnalysisMode.CHAT, prompt=prompt, max_new_tokens=32)
         return client.analyze(request).response.markdown
 
@@ -830,8 +835,8 @@ class OmniSightController(QObject):
             return  # a newer question started; this answer is stale
         self._search_pending = False
         self._search_outcome = outcome
-        if not outcome.results:
-            self._web_search_flag = True  # let the cloud tier ground itself if it ends up answering
+        if not outcome.results and self._smart_enabled:
+            self._web_search_flag = True  # Smart query is on: let the cloud tier write its own search if it answers
         if outcome.notice:
             self.window.show_notice(outcome.notice)
         self._dispatch()
@@ -845,7 +850,8 @@ class OmniSightController(QObject):
         if self._search_pending:
             return
         if self._pending_mode is AnalysisMode.CHAT:
-            if self.state.state is AppState.ANALYZING and self._worker is None:
+            if self.state.state is AppState.ANALYZING and self._chat_sent != self._search_token:
+                self._chat_sent = self._search_token
                 self._send_chat()
         elif self._held_capture is not None:
             capture, recording = self._held_capture
@@ -1039,8 +1045,10 @@ class OmniSightController(QObject):
         self._speaking_timer.stop()
         self.speaker.stop()
         self._search_token += 1  # a late search result must not touch a closing app
-        if self._search_worker is not None:
-            self._search_worker.wait(2000)
+        worker = self._search_worker
+        if worker is not None and not worker.wait(2000):
+            worker.terminate()  # a rewrite stuck on a slow node must not outlive the app as a destroyed running thread
+            worker.wait(500)
         self.node.shutdown()  # stops a node this app started; an adopted one is left alone
         self.hotkeys.stop()
         self.recorder.close()

@@ -78,6 +78,9 @@ def configure_logging(level: str = "INFO", log_dir: Path | None = None, console:
     logger = logging.getLogger(LOGGER_NAME)
     logger.setLevel(getattr(logging, level.upper(), logging.INFO))
     logger.propagate = False
+    # urllib3 logs every request line at DEBUG, query string included (web search queries are the user's
+    # own questions). Keep it quiet whatever level the app logs at, even if a handler is added to the root.
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
     for handler in list(logger.handlers):
         if getattr(handler, _INSTALLED_ATTR, False):
             logger.removeHandler(handler)

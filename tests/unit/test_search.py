@@ -264,3 +264,53 @@ def test_only_the_two_official_hosts_are_contacted_and_no_credentials_are_sent(h
         assert call.request.url.startswith("https://")
         assert set(call.request.headers) <= {"User-Agent", "Accept", "Accept-Encoding", "Connection"}
         assert "python%20keyerror" in call.request.url or "python+keyerror" in call.request.url
+
+
+# -- smart query: cleaning what a real model returns (observed on the local 2B) ------------------------
+
+from core.search import MAX_SMART_QUERY_CHARS, REWRITE_PROMPT, smart_query  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    ("reply", "expected"),
+    [
+        ('"undo last git commit keep changes"', "undo last git commit keep changes"),
+        ("Search \"Python script crashes with KeyError 'discount_rate' when config file is missing\"", "Python script crashes with KeyError 'discount_rate' when config file is missing"),
+        ("Search: react infinite render loop", "react infinite render loop"),
+        ("Search query: 'python keyerror dict get'", "python keyerror dict get"),
+        ("Keywords - git undo commit", "git undo commit"),
+        ("What-is-a-race-condition?", "What is a race condition?"),
+        ("pre-commit hook", "pre-commit hook"),  # a real hyphenated term with spaces elsewhere stays
+        ("**python keyerror**\nextra explanation line", "python keyerror"),
+        ("\u201csmart quotes query\u201d", "smart quotes query"),
+    ],
+)
+def test_smart_query_cleans_the_models_reply(reply: str, expected: str) -> None:
+    assert smart_query(lambda prompt: reply, "anything typed") == expected
+
+
+@pytest.mark.parametrize("reply", ["", "   ", "\n\n", '""', "Search:", "http://only.a.url/x"])
+def test_smart_query_returns_none_when_nothing_usable_comes_back(reply: str) -> None:
+    assert smart_query(lambda prompt: reply, "anything typed") is None
+
+
+def test_smart_query_is_bounded_and_uses_only_the_typed_question() -> None:
+    prompts: list[str] = []
+
+    def ask(prompt: str) -> str:
+        prompts.append(prompt)
+        return "word " * 100
+
+    result = smart_query(ask, "how do I fix https://example.com/secret?token=abc in python")
+    assert result is not None and len(result) <= MAX_SMART_QUERY_CHARS
+    assert prompts == [REWRITE_PROMPT.format(question="how do I fix in python")]  # the URL never reaches the model
+
+
+def test_smart_query_with_an_empty_question_or_a_failing_engine_is_none() -> None:
+    assert smart_query(lambda prompt: "x", "   ") is None
+
+    def broken(prompt: str) -> str:
+        raise RuntimeError("no node")
+
+    assert smart_query(broken, "a question") is None
+

@@ -100,10 +100,28 @@ def smart_query(ask: Callable[[str], str], question: str) -> str | None:
         logger.info("smart query failed: %s", type(exc).__name__)
         return None
     lines = [line for line in (reply or "").strip().splitlines() if line.strip()]
-    candidate = make_query(lines[0].strip().strip("\"'`*").strip()) if lines else ""
+    candidate = _tidy_rewrite(lines[0]) if lines else ""
     if len(candidate) > MAX_SMART_QUERY_CHARS:
         candidate = candidate[:MAX_SMART_QUERY_CHARS].rsplit(" ", 1)[0]
     return candidate or None
+
+
+_LEAD_IN = re.compile(r"^(?:web\s+)?(?:search(?:\s+query)?|query|keywords?)\s*[:\-]?\s*", re.IGNORECASE)
+_QUOTES = re.compile("[\"'`\u201c\u201d\u2018\u2019*]")
+
+
+def _tidy_rewrite(line: str) -> str:
+    """The model's one-line reply as a plain query: no lead-in word, quotes or hyphen-joined words."""
+    text = line.strip()
+    previous = None
+    while previous != text:  # "Search: 'x'" and "Search "x"" both come back in practice
+        previous = text
+        text = _LEAD_IN.sub("", text.strip())
+        text = text.strip("\"'`*\u201c\u201d\u2018\u2019 ")
+    text = _QUOTES.sub("", text) if text.count('"') else text
+    if " " not in text and text.count("-") >= 2:
+        text = text.replace("-", " ")  # the model sometimes joins the words of a query with hyphens
+    return make_query(text)
 
 
 def _result(title: object, url: str, snippet: object) -> WebResult | None:

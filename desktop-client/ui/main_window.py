@@ -253,14 +253,19 @@ class MainWindow(QWidget):
         self.search_check.setAccessibleName("Search web")
         self.search_check.setToolTip(
             "Off by default. On: your typed question is sent as a search to Stack Overflow and Wikipedia "
-            "(free, no account) and the top results are quoted to the model. Your screen is never searched."
+            "(free, no account) and the top results are quoted to the model. Your screen and voice are not "
+            "used as a query, unless you also turn on Smart query and the cloud engine answers."
         )
         self.search_check.toggled.connect(self._search_changed)
         options.addWidget(self.search_check)
         self.smart_check = QCheckBox("Smart query", self)
         self.smart_check.setAccessibleName("Smart query")
         self.smart_check.setEnabled(False)
-        self.smart_check.setToolTip("Let the model rewrite your question into search keywords first (one extra short model call)")
+        self.smart_check.setToolTip(
+            "Let the model write the search: your question is first rewritten into keywords (one extra short call on "
+            "Kaggle or this PC), and if the cloud engine answers it may run its own Google searches from the whole "
+            "question, including the screen and your voice"
+        )
         self.smart_check.toggled.connect(self.smart_toggled)
         options.addWidget(self.smart_check)
         options.addStretch(1)

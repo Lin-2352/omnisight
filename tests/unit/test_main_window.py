@@ -663,14 +663,25 @@ def test_hotkeys_and_the_capture_button_have_no_typed_question_so_nothing_is_sea
     assert FakeSearch.queries == [] and request.web_results == [] and request.web_search is False
 
 
-def test_a_spoken_question_asks_the_cloud_tier_to_ground_itself_instead(qapp: Any, make_controller: Any) -> None:
+def test_a_spoken_question_is_not_searched_and_does_not_let_the_cloud_write_searches_by_default(qapp: Any, make_controller: Any) -> None:
     controller, _ = make_controller()
-    controller.window.search_check.setChecked(True)
+    controller.window.search_check.setChecked(True)  # Smart query stays off
     controller.on_voice_pressed()
     controller.on_voice_released()
     assert wait_until(lambda: len(FakeWorker.instances) == 1, TIMEOUT_S, pump(qapp))
     request = FakeWorker.instances[0].request
-    assert FakeSearch.queries == [] and request.web_results == [] and request.web_search is True
+    assert FakeSearch.queries == [] and request.web_results == [] and request.web_search is False
+
+
+def test_with_smart_query_on_a_spoken_question_lets_the_cloud_tier_ground_itself(qapp: Any, make_controller: Any) -> None:
+    controller, _ = make_controller()
+    controller.window.search_check.setChecked(True)
+    controller.window.smart_check.setChecked(True)
+    controller.on_voice_pressed()
+    controller.on_voice_released()
+    assert wait_until(lambda: len(FakeWorker.instances) == 1, TIMEOUT_S, pump(qapp))
+    request = FakeWorker.instances[0].request
+    assert FakeSearch.queries == [] and request.web_search is True
 
 
 def test_a_typed_note_with_voice_is_the_query(qapp: Any, make_controller: Any) -> None:
@@ -682,14 +693,61 @@ def test_a_typed_note_with_voice_is_the_query(qapp: Any, make_controller: Any) -
     assert FakeSearch.queries == ["python keyerror"] and len(FakeWorker.instances[0].request.web_results) == 2
 
 
-def test_a_search_that_finds_nothing_warns_and_lets_the_cloud_tier_try(qapp: Any, make_controller: Any) -> None:
+def test_a_search_that_finds_nothing_warns_and_asks_for_no_cloud_search_by_default(qapp: Any, make_controller: Any) -> None:
     controller, _ = make_controller()
     FakeSearch.outcome = SearchOutcome(query="q", notice="Web search is unavailable right now. Answering without it.")
-    controller.window.search_check.setChecked(True)
+    controller.window.search_check.setChecked(True)  # Smart query off: the cloud tier must not search on its own
     ask(controller, qapp, "why?", 1)
     request = FakeWorker.instances[0].request
-    assert request.web_results == [] and request.web_search is True
-    assert controller.window.notice.isVisible() or "unavailable" in controller.window.notice.text()
+    assert request.web_results == [] and request.web_search is False
+    assert "unavailable" in controller.window.notice.text()
+
+
+def test_with_smart_query_on_a_failed_search_lets_the_cloud_tier_try(qapp: Any, make_controller: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    controller, _ = make_controller()
+    FakeSearch.outcome = SearchOutcome(query="q", notice="Web search is unavailable right now. Answering without it.")
+    monkeypatch.setattr(controller, "_ask_engine", lambda prompt: "keywords")
+    controller.window.search_check.setChecked(True)
+    controller.window.smart_check.setChecked(True)
+    ask(controller, qapp, "why?", 1)
+    assert FakeWorker.instances[0].request.web_search is True
+
+
+def test_the_search_tooltips_are_honest_about_what_the_cloud_tier_may_see(qapp: Any) -> None:
+    window = MainWindow()
+    assert "not used as a query" in window.search_check.toolTip() and "Smart query" in window.search_check.toolTip()
+    smart = window.smart_check.toolTip()
+    assert "screen" in smart and "voice" in smart and "Google searches" in smart
+
+
+def test_a_chat_sent_before_the_previous_worker_retired_is_not_dropped(qapp: Any, make_controller: Any) -> None:
+    controller, _ = make_controller()
+    controller.window.screen_check.setChecked(False)
+    ask(controller, qapp, "first", 1)
+    controller._worker = FakeWorker(None, None, FakeWorker.instances[0].request)  # the old worker has not retired yet
+    controller.window.ask_box.setText("second")
+    controller.window.send_button.click()
+    assert wait_until(lambda: controller.window.exchange_count == 2, TIMEOUT_S, pump(qapp))
+    assert controller.state.state is AppState.IDLE
+
+
+def test_the_rewrite_call_is_bounded_and_never_uses_the_web_tier(qapp: Any, make_controller: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    controller, _ = make_controller()
+    seen: list[Any] = []
+
+    class FakeClient:
+        def __init__(self, settings: Any, resolver: Any) -> None:
+            seen.append(settings)
+
+        def analyze(self, request: Any) -> Any:
+            response = AnalyzeResponse.model_validate({**analyze_response_json(), "markdown": "python keyerror"})
+            return ClientResult(response=response, metrics=LatencyMetrics())
+
+    monkeypatch.setattr(main, "InferenceClient", FakeClient)
+    assert controller._ask_engine("rewrite this") == "python keyerror"
+    (settings,) = seen
+    assert settings.fallback_api_url is None and settings.retries == 0
+    assert settings.request_deadline_s <= 20 and settings.read_timeout_s <= 15 and settings.local_timeout_s <= 20
 
 
 def test_the_request_waits_for_a_slow_search_and_then_goes_out(qapp: Any, make_controller: Any) -> None:
