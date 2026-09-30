@@ -78,6 +78,11 @@ class Verdict:
 _STRIP = re.compile(r"[`^\"']")
 _SPACES = re.compile(r"\s+")
 _SEGMENT = re.compile(r"&&|\|\||[;&|\n]")
+_SEGMENT_KEEP = re.compile(r"(&&|\|\||[;&|\n])")
+_REGISTRY_PATH = re.compile(r"^(hk(lm|cu|cr|u|cc)|hkey_[a-z_]+):|^registry::")
+_REGISTRY_READ_VERBS = frozenset({"get-itemproperty", "get-itempropertyvalue", "get-item", "get-childitem", "gp", "gpv", "gi", "gci", "dir", "ls", "test-path", "reg", "cd", "set-location", "sl", "push-location", "pushd"})
+_RELATIVE_HERE = frozenset({".", "./", ".\\", "./*", ".\\*", "*", "*.*"})
+_RELATIVE_UP = frozenset({"..", "../", "..\\", "../*", "..\\*"})
 
 _ALWAYS_REFUSED: Final[dict[str, str]] = {
     "format": "formats a disk",
@@ -150,6 +155,36 @@ def _verb(tokens: list[str]) -> str:
     return name[:-4] if name.endswith(".exe") else name
 
 
+def protected_folder(path: Path) -> bool:
+    """A folder where a wildcard delete would be a disaster: a drive root, the home folder (or ``Users``), Windows, Program Files."""
+    try:
+        resolved = path.resolve()
+    except OSError:
+        resolved = path
+    if resolved == resolved.parent:
+        return True
+    home = Path.home().resolve()
+    if resolved in (home, home.parent):
+        return True
+    for variable in ("SystemRoot", "windir", "ProgramFiles", "ProgramFiles(x86)", "ProgramData"):
+        value = os.environ.get(variable)
+        if value:
+            base = Path(value).resolve()
+            if resolved == base or base in resolved.parents:
+                return True
+    return False
+
+
+def _relative_target_is_protected(token: str, cwd: Path | None) -> bool:
+    if cwd is None:
+        return False
+    if token in _RELATIVE_HERE:
+        return protected_folder(cwd)
+    if token in _RELATIVE_UP:
+        return protected_folder(cwd.parent)
+    return False
+
+
 def _is_dangerous_delete(tokens: list[str]) -> bool:
     flags = [t for t in tokens[1:] if t.startswith(("-", "/")) and len(t) > 1 and not _DANGEROUS_TARGETS.match(t)]
     recursive = any(
@@ -170,10 +205,15 @@ def _inner_command(segment: str, tokens: list[str]) -> str:
     return ""
 
 
-def check_command(text: str) -> Verdict:
-    """Classify ``text``: refuse what must never run, warn about what deserves a second look."""
+def check_command(text: str, shell: str = "powershell", cwd: Path | None = None) -> Verdict:
+    """Classify ``text``: refuse what must never run, warn about what deserves a second look.
+
+    ``shell`` and ``cwd`` are what it will run in: ``cmd`` runs only one line, and ``.``/``*`` mean the working folder.
+    """
     if not text.strip():
         return Verdict(refused="The command is empty.")
+    if shell == "cmd" and len([line for line in text.splitlines() if line.strip()]) > 1:
+        return Verdict(refused="A cmd block with several lines would run only its first line. Run the lines one at a time, or use a PowerShell block.")
     if len(text) > MAX_COMMAND_CHARS:
         return Verdict(refused=f"The command is {len(text)} characters long; the limit is {MAX_COMMAND_CHARS}.")
     if len([line for line in text.splitlines() if line.strip()]) > MAX_COMMAND_LINES:
@@ -201,12 +241,23 @@ def check_command(text: str) -> Verdict:
     if re.search(r"&&|\|\||;|(?<!&)&(?!&)", text):
         warnings.append("chains several commands")
 
-    for segment in _SEGMENT.split(text):
+    pieces = _SEGMENT_KEEP.split(text)
+    for position in range(0, len(pieces), 2):
+        segment = pieces[position]
+        after_pipe = position > 0 and pieces[position - 1] == "|"
         tokens = _tokens(segment)
         verb = _verb(tokens)
         if not verb:
             continue
         rest = " ".join(tokens[1:])
+        if verb not in _REGISTRY_READ_VERBS and any(_REGISTRY_PATH.match(t) for t in tokens[1:]):
+            return Verdict(refused="It changes the Windows registry.")
+        if verb in _DELETE_VERBS:
+            arguments = [t for t in tokens[1:] if not (t.startswith(("-", "/")) and len(t) > 1 and not _DANGEROUS_TARGETS.match(t))]
+            if after_pipe and not arguments:
+                return Verdict(refused="It deletes whatever the previous command lists, which cannot be checked. Run that part yourself.")
+            if any(_relative_target_is_protected(t, cwd) for t in arguments):
+                return Verdict(refused="It would delete everything in a protected folder (a drive root, your home folder or a Windows folder).")
         if verb in _ALWAYS_REFUSED:
             return Verdict(refused=f"'{verb}' {_ALWAYS_REFUSED[verb]}.")
         if verb in {"powershell", "pwsh"} and any(t in _POWERSHELL_ENCODED for t in tokens[1:]):
@@ -214,7 +265,7 @@ def check_command(text: str) -> Verdict:
         if verb in _NESTED_SHELLS:
             inner = _inner_command(segment, tokens)
             if inner:
-                nested = check_command(inner)
+                nested = check_command(inner, shell, cwd)
                 if nested.refused:
                     return Verdict(refused=nested.refused + " (inside a nested shell)")
                 warnings.extend(nested.warnings)
@@ -265,15 +316,15 @@ class Approval:
     def create(cls, command: str, shell: str, typed: str) -> Approval:
         return cls(command=command, shell=shell, typed=typed, digest=digest_of(command))
 
-    def problem(self) -> str | None:
-        """Why this is not a valid approval (``None`` when it is)."""
+    def problem(self, cwd: Path | None = None) -> str | None:
+        """Why this is not a valid approval (``None`` when it is). ``cwd`` is the folder it would run in."""
         if self.typed != CONFIRM_WORD:
             return f"Type {CONFIRM_WORD} (capital letters) to approve."
         if self.shell not in {"powershell", "cmd"}:
             return "Unknown shell."
         if digest_of(self.command) != self.digest:
             return "The command changed after it was shown."
-        return check_command(self.command).refused
+        return check_command(self.command, self.shell, cwd).refused
 
 
 class ActionRefused(Exception):
@@ -377,7 +428,7 @@ _CREATE_NO_WINDOW = 0x08000000
 _CREATE_SUSPENDED = 0x00000004
 
 
-def default_spawn(argv: list[str], cwd: Path, env: dict[str, str]) -> ProcessLike:
+def default_spawn(argv: list[str] | str, cwd: Path, env: dict[str, str]) -> ProcessLike:
     flags = (_CREATE_NO_WINDOW | _CREATE_SUSPENDED) if os.name == "nt" else 0  # suspended: joined to the job before it runs
     return subprocess.Popen(  # noqa: S603 - argv list, shell=False; the text is what the user approved
         argv, cwd=str(cwd), env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, creationflags=flags
@@ -392,9 +443,11 @@ def default_resume(process: ProcessLike) -> None:
     ctypes.WinDLL("ntdll").NtResumeProcess(ctypes.c_void_p(int(getattr(process, "_handle"))))  # noqa: B009 - Popen's Win32 handle
 
 
-def build_argv(shell: str, command: str) -> list[str]:
+def build_argv(shell: str, command: str) -> list[str] | str:
+    """The process to start. PowerShell gets an argument list. ``cmd`` gets one raw command line: with ``/s`` it strips only the
+    outer quotes, so the text runs exactly as shown (Python's list quoting would turn ``"`` into ``\"``, which cmd does not understand)."""
     if shell == "cmd":
-        return ["cmd.exe", "/d", "/c", command]
+        return f'cmd.exe /d /s /c "{command}"'
     return ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command]
 
 
@@ -414,13 +467,15 @@ class ActionRunner:
     def __init__(
         self,
         *,
-        spawn: Callable[[list[str], Path, dict[str, str]], ProcessLike] = default_spawn,
+        spawn: Callable[[list[str] | str, Path, dict[str, str]], ProcessLike] = default_spawn,
         resume: Callable[[ProcessLike], None] = default_resume,
         job_factory: Callable[[], JobLike | None] = default_job,
         audit: AuditLog | None = None,
         environ: Mapping[str, str] | None = None,
         clock: Callable[[], float] = time.monotonic,
+        require_job: bool | None = None,
     ) -> None:
+        self._require_job = (os.name == "nt") if require_job is None else require_job
         self._spawn = spawn
         self._resume = resume
         self._job_factory = job_factory
@@ -442,7 +497,7 @@ class ActionRunner:
         cancel: threading.Event | None = None,
     ) -> RunResult:
         """Run ``approval.command``. Raises ``ActionRefused`` (and logs it) unless the approval is complete and valid."""
-        problem = approval.problem()
+        problem = approval.problem(Path(cwd))
         if problem is None and not Path(cwd).is_dir():
             problem = f"The working folder does not exist: {cwd}"
         if problem is not None:
@@ -452,6 +507,10 @@ class ActionRunner:
         env = scrub_env(self._environ if self._environ is not None else os.environ)
         argv = build_argv(approval.shell, approval.command)
         job = self._job_factory()
+        if job is None and self._require_job:
+            reason = "Could not create a process group that ends the command's children, so it was not run."
+            self.audit.record("refused", command=approval.command, shell=approval.shell, cwd=str(cwd), reason=reason)
+            raise ActionRefused(reason)
         started = self._clock()
         try:
             process = self._spawn(argv, Path(cwd), env)

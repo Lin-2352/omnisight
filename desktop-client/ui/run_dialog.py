@@ -24,7 +24,7 @@ from core.actions import (
 )
 from core.logger import get_logger
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QCloseEvent, QFont
+from PyQt6.QtGui import QCloseEvent, QFont, QShowEvent
 from PyQt6.QtWidgets import (
     QDialog,
     QFileDialog,
@@ -39,6 +39,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ui.components import BASE, BLUE, MANTLE, OVERLAY0, PEACH, RED, SUBTEXT, SURFACE0, SURFACE1, TEXT, YELLOW
+from ui.hud import exclude_from_capture
 
 logger = get_logger("run_dialog")
 
@@ -89,11 +90,12 @@ class RunDialog(QDialog):
         self._command = command  # never edited; the approval is built from exactly this string
         self._shell = shell_for(language)
         self._runner = runner
-        self._verdict = check_command(command)
+        self._verdict = check_command(command, self._shell, Path(cwd))
         self._worker: RunWorker | None = None
         self._cancel = threading.Event()
         self._ran = False
         self.cwd = Path(cwd)
+        self.capture_excluded = False
         self.result: RunResult | None = None
         self.setWindowTitle("Run command")
         self.setModal(True)
@@ -155,6 +157,7 @@ class RunDialog(QDialog):
         self.confirm_edit.setMaxLength(16)
         self.confirm_edit.setStyleSheet(f"QLineEdit {{ background: {SURFACE0}; color: {TEXT}; border: 1px solid {SURFACE1}; border-radius: 6px; padding: 5px; }}")
         self.confirm_edit.textChanged.connect(self._refresh)
+        self.folder_edit.textChanged.connect(self._recheck)
         confirm_row.addWidget(self.confirm_edit, 1)
         layout.addLayout(confirm_row)
 
@@ -193,6 +196,22 @@ class RunDialog(QDialog):
 
     def _approved(self) -> bool:
         return self.confirm_edit.text() == CONFIRM_WORD and not self._verdict.refused and not self.running
+
+    def _recheck(self) -> None:
+        """The working folder changed: the same text can mean something else (``.`` or ``*`` in a protected folder)."""
+        folder = Path(self.folder_edit.text().strip() or str(Path.home()))
+        self._verdict = check_command(self._command, self._shell, folder)
+        if self._verdict.refused:
+            self.verdict_label.setText(f"Refused: {self._verdict.refused} OmniSight will not run this command, even if you approve it.")
+            self.verdict_label.setStyleSheet(f"color: {RED}; font-weight: 700;")
+            self.verdict_label.setVisible(True)
+        elif self._verdict.warnings:
+            self.verdict_label.setText("Take a second look: this command " + "; ".join(self._verdict.warnings) + ".")
+            self.verdict_label.setStyleSheet(f"color: {PEACH};")
+            self.verdict_label.setVisible(True)
+        else:
+            self.verdict_label.setVisible(False)
+        self._refresh()
 
     def _refresh(self) -> None:
         self.run_button.setEnabled(self._approved())
@@ -257,6 +276,13 @@ class RunDialog(QDialog):
         if not self._ran and not self._verdict.refused:
             self._runner.cancel_record(self._command, self._shell, str(self.cwd))
         super().reject()
+
+    def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 - Qt API
+        """The dialog and the command's output must never appear in a screenshot a model could read (like the HUD and the window)."""
+        super().showEvent(event)
+        if not self.capture_excluded:
+            self.capture_excluded = exclude_from_capture(self)
+            logger.info("run dialog excluded from screen capture: %s", self.capture_excluded)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt API
         if self.running:

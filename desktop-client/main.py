@@ -506,6 +506,7 @@ class OmniSightController(QObject):
         self.actions = ActionRunner()
         self._actions_enabled = bool(saved.value("actions_enabled", False, type=bool))
         self._actions_cwd = Path(str(saved.value("actions_cwd", str(Path.home()))))
+        self._action_dialog_open = False  # while it is open (and its output on screen) watch must not look at the screen
         self._search_enabled = bool(saved.value("web_search", False, type=bool))
         self._smart_enabled = bool(saved.value("smart_query", False, type=bool)) and self._search_enabled
         self.watch = WatchScheduler(_watch_interval())
@@ -862,7 +863,11 @@ class OmniSightController(QObject):
         if not self._actions_enabled or not is_shell_language(language) or not command.strip():
             return
         dialog = RunDialog(command, language, self.actions, self._actions_cwd, parent=self.window)
-        dialog.exec()
+        self._action_dialog_open = True
+        try:
+            dialog.exec()
+        finally:
+            self._action_dialog_open = False
         self._actions_cwd = dialog.cwd
         QSettings().setValue("actions_cwd", str(self._actions_cwd))
 
@@ -947,7 +952,7 @@ class OmniSightController(QObject):
         if not self.watch.running:
             return
         last = self.foreground.last_external
-        busy = self.state.is_busy or self._worker is not None
+        busy = self.state.is_busy or self._worker is not None or self._action_dialog_open
         if not self.watch.due(busy=busy, window=last.hwnd if last is not None else None):
             return
         self.watch.begin()
@@ -965,7 +970,7 @@ class OmniSightController(QObject):
         if not self.watch.running or self.watch.paused:
             self.watch.finish(True)
             return
-        if self.state.is_busy or self._worker is not None:
+        if self.state.is_busy or self._worker is not None or self._action_dialog_open:
             self.watch.finish(True)  # the user started something while this frame was being taken
             return
         try:

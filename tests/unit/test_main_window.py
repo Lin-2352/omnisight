@@ -1511,3 +1511,39 @@ def test_the_switch_and_the_run_button_have_accessible_names_and_honest_tooltips
     window.actions_toggled.connect(toggles.append)
     window.set_actions_enabled(False)  # programmatic: no echo as a user toggle
     assert toggles == []
+
+
+def test_watch_does_not_look_at_the_screen_while_the_run_dialog_is_open(qapp: Any, watching: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The dialog shows the command's output; it must not be captured and sent to a model as a 'possible error'."""
+    controller, fake, clock, tray = watching()
+    FakeWorker.script = ["NO"]
+    controller.window.watch_check.setChecked(True)
+    controller._actions_enabled = True
+    grabs_during: list[int] = []
+
+    class InspectingDialog(FakeDialog):
+        def exec(self) -> int:
+            assert controller._action_dialog_open is True
+            before = fake.grabs
+            clock.advance(60.0)
+            controller._watch_tick()  # a tick arrives while the dialog is open
+            qapp.processEvents()
+            grabs_during.append(fake.grabs - before)
+            return 0
+
+    monkeypatch.setattr(main, "RunDialog", InspectingDialog)
+    controller.on_run_requested("powershell", "git status")
+    assert grabs_during == [0] and controller._action_dialog_open is False
+    clock.advance(11.0)
+    controller._watch_tick()  # and it resumes afterwards
+    assert wait_until(lambda: fake.grabs > 0, TIMEOUT_S, pump(qapp))
+
+
+def test_a_frame_taken_just_before_the_dialog_opened_is_dropped(qapp: Any, watching: Any) -> None:
+    controller, fake, clock, tray = watching()
+    controller.window.watch_check.setChecked(True)
+    controller.watch.begin()
+    controller._action_dialog_open = True
+    controller._on_watch_captured(object(), None)  # type: ignore[arg-type]
+    assert not controller.watch.in_flight and not FakeWorker.instances
+    controller._action_dialog_open = False

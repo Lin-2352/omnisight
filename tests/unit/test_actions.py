@@ -194,7 +194,7 @@ class Rig:
 
     def __init__(self, tmp_path: Path, process: FakeProcess | None = None, job: FakeJob | None = None, clock: ManualClock | None = None,
                  environ: dict[str, str] | None = None) -> None:
-        self.spawned: list[tuple[list[str], Path, dict[str, str]]] = []
+        self.spawned: list[tuple[list[str] | str, Path, dict[str, str]]] = []
         self.resumed = 0
         self.process = process or FakeProcess(b"hello\n")
         self.job = job or FakeJob()
@@ -204,9 +204,10 @@ class Rig:
         self.runner = ActionRunner(
             spawn=self._spawn, resume=self._resume, job_factory=lambda: self.job, audit=self.audit,
             environ=environ if environ is not None else {"PATH": "x", "GITHUB_TOKEN": "t0ps3cret", "MY_API_KEY": "k"}, clock=self.clock,
+            require_job=True,
         )
 
-    def _spawn(self, argv: list[str], cwd: Path, env: dict[str, str]) -> FakeProcess:
+    def _spawn(self, argv: list[str] | str, cwd: Path, env: dict[str, str]) -> FakeProcess:
         self.spawned.append((argv, cwd, env))
         return self.process
 
@@ -229,7 +230,7 @@ def test_an_approved_command_runs_in_the_chosen_folder_and_returns_its_output(tm
 def test_argv_uses_no_shell_string_and_keeps_the_text_as_one_argument() -> None:
     hostile = 'echo "a" ; echo $(whoami) `id` && dir'
     assert build_argv("powershell", hostile) == ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", hostile]
-    assert build_argv("cmd", hostile) == ["cmd.exe", "/d", "/c", hostile]
+    assert build_argv("cmd", hostile) == f'cmd.exe /d /s /c "{hostile}"'
 
 
 def test_the_environment_is_scrubbed_of_secrets_before_the_command_sees_it(tmp_path: Path) -> None:
@@ -454,3 +455,170 @@ def test_the_audit_entries_are_valid_json_lines(tmp_path: Path) -> None:
     rig.runner.run(rig.approve("echo \"quoted\" 'text' \\ backslash \u00e9"), tmp_path)
     for line in (tmp_path / "actions.log").read_text(encoding="utf-8").splitlines():
         assert json.loads(line)["decision"] == "approved"
+
+
+# -- review fixes: the text that runs is the text that was shown, more refusals, folder-aware checks ---------------------
+
+from core.actions import protected_folder  # noqa: E402
+
+
+def test_cmd_gets_one_raw_command_line_so_quotes_survive_and_powershell_gets_an_argument_list() -> None:
+    hostile = 'echo "a & b" & dir'
+    assert build_argv("cmd", hostile) == 'cmd.exe /d /s /c "echo "a & b" & dir"'
+    assert build_argv("powershell", hostile) == ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", hostile]
+
+
+@windows_only
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ('echo "a & b"', '"a & b"'),
+        ('echo "x" & echo second', '"x"  | second'),
+        ('cd /d "C:\\Program Files" && dir /b | findstr /i "common"', "Common Files"),
+        ('echo a"&"echo injected', 'a"&"echo injected'),
+        ('echo 50% ^& ^| ^>', "50% & | >"),
+    ],
+)
+def test_a_real_cmd_command_runs_exactly_as_shown(tmp_path: Path, command: str, expected: str) -> None:
+    result = real_runner(tmp_path).run(Approval.create(command, "cmd", CONFIRM_WORD), tmp_path, timeout_s=60)
+    assert result.exit_code == 0 and result.output.strip().replace("\r\n", " | ") == expected, result.output
+
+
+@windows_only
+def test_a_real_multi_line_powershell_block_runs_every_line(tmp_path: Path) -> None:
+    result = real_runner(tmp_path).run(Approval.create("Write-Output one\nWrite-Output two\nWrite-Output three", "powershell", CONFIRM_WORD), tmp_path, timeout_s=60)
+    assert result.output.split() == ["one", "two", "three"]
+
+
+@windows_only
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("Write-Output 'a \"quoted\" & b'", 'a "quoted" & b'),
+        ('Write-Output "x"; Write-Output "y"', "x y"),
+        ("Write-Output \"it's $(1 + 1)\"", "it's 2"),
+    ],
+)
+def test_a_real_powershell_command_keeps_its_quotes(tmp_path: Path, command: str, expected: str) -> None:
+    result = real_runner(tmp_path).run(Approval.create(command, "powershell", CONFIRM_WORD), tmp_path, timeout_s=60)
+    assert result.output.strip().replace("\r\n", " ") == expected, result.output
+
+
+def test_a_cmd_block_with_several_lines_is_refused_because_only_the_first_would_run() -> None:
+    assert "only its first line" in (check_command("echo one\necho two", "cmd").refused or "")
+    assert check_command("echo one\necho two", "powershell").refused is None
+    assert check_command("echo one\n\n", "cmd").refused is None  # blank lines do not count
+    approval = Approval.create("echo one\necho two", "cmd", CONFIRM_WORD)
+    assert approval.problem() is not None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        r"Get-ChildItem C:\ -Recurse | Remove-Item -Recurse -Force",
+        "Get-ChildItem | Remove-Item",
+        "dir /b | del",
+        "ls | rm -r",
+        "Get-ChildItem *.tmp | ri -Force",
+    ],
+)
+def test_a_delete_fed_by_a_pipe_is_refused_because_its_target_cannot_be_checked(command: str) -> None:
+    assert "previous command" in (check_command(command).refused or ""), command
+
+
+def test_a_delete_with_an_explicit_target_after_a_pipe_is_not_treated_as_pipe_fed() -> None:
+    assert check_command("echo hi | Out-Null; Remove-Item old.log").refused is None
+    assert check_command("Get-ChildItem | Remove-Item build").refused is None
+
+
+@pytest.fixture
+def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A home folder under tmp_path. pytest's temp folder may itself be inside the Windows folder (a protected place), so the
+    Windows-folder variables are pointed at folders that do not exist."""
+    home = tmp_path / "Users" / "me"
+    (home / "project").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    for variable in ("SystemRoot", "windir", "ProgramFiles", "ProgramFiles(x86)", "ProgramData"):
+        monkeypatch.setenv(variable, str(tmp_path / "no-such-windows-folder"))
+    return home
+
+
+@pytest.mark.parametrize("command", ["rm -rf ./*", "rm -rf .", "rm -rf *", r"rd /s /q .", r"del /s /q *.*", r"Remove-Item -Recurse .\*", "rm -r -f ./", "rm *"])
+def test_a_wildcard_delete_in_a_protected_folder_is_refused(fake_home: Path, command: str) -> None:
+    verdict = check_command(command, "powershell", fake_home)
+    assert verdict.refused and "protected folder" in verdict.refused, command
+
+
+@pytest.mark.parametrize("command", ["rm -rf ./*", "rm -rf .", r"rd /s /q .", "Remove-Item -Recurse .\\*"])
+def test_the_same_delete_inside_a_project_folder_is_allowed_with_a_warning(fake_home: Path, command: str) -> None:
+    verdict = check_command(command, "powershell", fake_home / "project")
+    assert verdict.refused is None and "deletes files" in verdict.warnings
+
+
+def test_dot_dot_resolves_to_the_parent_folder(fake_home: Path) -> None:
+    assert check_command("rm -rf ../*", "powershell", fake_home / "project").refused  # the parent is the home folder
+    assert check_command("rm -rf ../*", "powershell", fake_home / "project" / "sub").refused is None
+
+
+def test_drive_roots_and_windows_folders_are_protected(fake_home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    assert protected_folder(Path(tmp_path.anchor)) and protected_folder(fake_home) and protected_folder(fake_home.parent)
+    assert not protected_folder(fake_home / "project") and not protected_folder(tmp_path / "elsewhere")
+    windows = tmp_path / "Win"
+    (windows / "System32").mkdir(parents=True)
+    monkeypatch.setenv("SystemRoot", str(windows))
+    assert protected_folder(windows) and protected_folder(windows / "System32")
+    assert check_command("del *", "cmd", windows).refused
+
+
+def test_without_a_folder_a_relative_delete_only_warns() -> None:
+    verdict = check_command("rm -rf ./*")
+    assert verdict.refused is None and "deletes files" in verdict.warnings
+
+
+def test_the_runner_checks_the_folder_at_run_time_too(fake_home: Path, tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    with pytest.raises(ActionRefused, match="protected folder"):
+        rig.runner.run(rig.approve("rm -rf ./*"), fake_home)
+    assert rig.spawned == []
+    rig.runner.run(rig.approve("rm -rf ./*"), fake_home / "project")  # the same text in a project folder is allowed
+    assert len(rig.spawned) == 1
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        r"Set-ItemProperty -Path HKCU:\Software\Microsoft\Windows\CurrentVersion\Run -Name x -Value calc",
+        r"New-ItemProperty HKLM:\Software\x -Name y -Value 1",
+        r"Remove-Item -Recurse HKCU:\Software\x",
+        r"New-Item -Path HKLM:\Software\Evil",
+        r"sp HKCU:\Software\x y 1",
+        r"Remove-ItemProperty -Path 'HKLM:\Software\x' -Name y",
+        r"Set-ItemProperty Registry::HKEY_LOCAL_MACHINE\Software\x y 1",
+        r"Set-ItemProperty -LiteralPath HKCU:\Software\x -Name y -Value 1",
+    ],
+)
+def test_powershell_registry_writes_are_refused(command: str) -> None:
+    assert "registry" in (check_command(command).refused or ""), command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [r"Get-ItemProperty HKCU:\Software\x", r"Test-Path HKLM:\Software\x", r"Get-ChildItem HKCU:\Software", r"reg query HKLM\Software", r"cd HKCU:\Software"],
+)
+def test_reading_the_registry_is_allowed(command: str) -> None:
+    assert check_command(command).refused is None, command
+
+
+def test_without_a_process_group_the_command_is_not_run_at_all(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    strict = ActionRunner(spawn=rig._spawn, resume=rig._resume, job_factory=lambda: None, audit=rig.audit, environ={"PATH": "x"}, require_job=True)
+    with pytest.raises(ActionRefused, match="process group"):
+        strict.run(rig.approve(), tmp_path)
+    assert rig.spawned == [] and rig.audit.entries()[-1]["decision"] == "refused"
+    relaxed = ActionRunner(spawn=rig._spawn, resume=rig._resume, job_factory=lambda: None, audit=rig.audit, environ={"PATH": "x"}, require_job=False)
+    assert relaxed.run(rig.approve(), tmp_path).exit_code == 0  # only for platforms without Job Objects (the tests)
+
+
+@windows_only
+def test_on_windows_the_default_runner_insists_on_a_job_object() -> None:
+    assert ActionRunner()._require_job is True

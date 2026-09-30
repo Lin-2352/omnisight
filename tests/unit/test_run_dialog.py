@@ -100,7 +100,7 @@ def test_the_shell_follows_the_language_tag(qapp: Any, tmp_path: Path) -> None:
     type_into(dialog, CONFIRM_WORD)
     dialog.run_button.click()
     assert wait_until(lambda: dialog.result is not None, TIMEOUT_S, pump(qapp))
-    assert rig.spawned[0][0][0] == "cmd.exe"
+    assert str(rig.spawned[0][0]).startswith('cmd.exe /d /s /c "dir /b"')
 
 
 def test_a_refused_command_can_never_be_run_even_when_run_is_typed(qapp: Any, tmp_path: Path) -> None:
@@ -250,3 +250,43 @@ def test_a_timeout_is_explained(qapp: Any, tmp_path: Path) -> None:
     assert wait_until(lambda: dialog.result is not None, TIMEOUT_S, pump(qapp))
     assert dialog.result.timed_out and "did not finish within 5 s" in dialog.status.text()
     _unused: Any = threading  # the worker ran on its own thread
+
+
+def test_the_dialog_is_excluded_from_screen_capture_when_it_is_shown(qapp: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Its text and the command's output must never end up in a screenshot a model could read."""
+    import ui.run_dialog as module
+
+    calls: list[Any] = []
+    monkeypatch.setattr(module, "exclude_from_capture", lambda widget: (calls.append(widget), True)[1])
+    rig = Rig(tmp_path)
+    dialog = open_dialog(qapp, rig)
+    assert calls == [dialog] and dialog.capture_excluded
+    dialog.hide()
+    dialog.show()  # shown again: excluded once, not repeatedly
+    assert len(calls) == 1
+
+
+def test_choosing_a_protected_folder_turns_a_wildcard_delete_into_a_refusal(qapp: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    home = tmp_path / "Users" / "me"
+    (home / "project").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    for variable in ("SystemRoot", "windir", "ProgramFiles", "ProgramFiles(x86)", "ProgramData"):
+        monkeypatch.setenv(variable, str(tmp_path / "no-such-windows-folder"))  # the temp folder may be under C:\Windows\Temp
+    rig = Rig(tmp_path)
+    dialog = RunDialog("rm -rf ./*", "powershell", rig.runner, home / "project")
+    dialog.show()
+    qapp.processEvents()
+    assert "Take a second look" in dialog.verdict_label.text()
+    type_into(dialog, CONFIRM_WORD)
+    assert dialog.run_button.isEnabled()
+    dialog.folder_edit.setText(str(home))  # the user picks their home folder
+    assert "Refused" in dialog.verdict_label.text() and "protected folder" in dialog.verdict_label.text()
+    assert not dialog.run_button.isEnabled()
+    dialog.folder_edit.setText(str(home / "project"))
+    assert dialog.run_button.isEnabled()
+
+
+def test_a_cmd_block_with_several_lines_is_refused_in_the_dialog(qapp: Any, tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    dialog = open_dialog(qapp, rig, "echo one\necho two", "bat")
+    assert "only its first line" in dialog.verdict_label.text() and not dialog.run_button.isEnabled()
