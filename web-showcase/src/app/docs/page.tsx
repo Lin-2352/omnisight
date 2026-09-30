@@ -99,7 +99,7 @@ export default function DocsPage() {
                 also the desktop client&apos;s last failover tier.
               </li>
               <li>
-                <strong className="text-ink">shared/</strong>: Pydantic models (contract 2.1.0) exported to JSON Schema, from which
+                <strong className="text-ink">shared/</strong>: Pydantic models (contract 2.2.0) exported to JSON Schema, from which
                 this site&apos;s TypeScript types are generated and drift-checked in CI.
               </li>
             </ul>

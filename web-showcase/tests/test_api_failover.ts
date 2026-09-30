@@ -64,7 +64,7 @@ const nodeStub = createServer(async (req, res) => {
     if (state.node === "hang") return; // never answers; the route's 3 s probe must give up
     return sendJson(res, 200, {
       status: state.node === "loading" ? "loading" : "ok",
-      contract_version: "2.1.0",
+      contract_version: "2.2.0",
       model_id: "Qwen/Qwen2-VL-7B-Instruct",
       model_loaded: state.node !== "loading",
       gpu_available: true,
@@ -78,7 +78,7 @@ const nodeStub = createServer(async (req, res) => {
     }
     return sendJson(res, 200, {
       request_id: request.request_id,
-      contract_version: "2.1.0",
+      contract_version: "2.2.0",
       model_id: "Qwen/Qwen2-VL-7B-Instruct",
       source: "kaggle",
       summary: "Stub node answer.",

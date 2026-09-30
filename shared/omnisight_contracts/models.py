@@ -35,7 +35,9 @@ from pydantic import (
     model_validator,
 )
 
-CONTRACT_VERSION: Final[str] = "2.1.0"
+# 2.2.0 (additive): optional ``history`` (text-only earlier turns), ``chat`` mode, and ``image`` is
+# optional for ``chat``. Every 2.1.0 request is still valid; a 2.1.0 node rejects the new fields.
+CONTRACT_VERSION: Final[str] = "2.2.0"
 
 #: Decoded byte budget for a single screenshot (350 KiB).
 MAX_IMAGE_BYTES: Final[int] = 350 * 1024
@@ -44,6 +46,10 @@ MAX_AUDIO_BYTES: Final[int] = 3 * 1024 * 1024
 MAX_AUDIO_DURATION_MS: Final[int] = 30_000
 MAX_IMAGE_DIMENSION: Final[int] = 8192
 MAX_PROMPT_CHARS: Final[int] = 4000
+#: Conversation memory: text only (never screenshots), so context and VRAM stay small.
+MAX_HISTORY_TURNS: Final[int] = 12
+MAX_TURN_CHARS: Final[int] = 2000
+MAX_HISTORY_CHARS: Final[int] = 12_000
 MAX_MARKDOWN_CHARS: Final[int] = 65_536
 MAX_SUMMARY_CHARS: Final[int] = 500
 MAX_CODE_BLOCKS: Final[int] = 50
@@ -76,6 +82,8 @@ class AnalysisMode(str, Enum):
     SUMMARIZE = "summarize"
     OCR = "ocr"
     VOICE_QUERY = "voice_query"
+    #: General conversation: no screenshot is needed (contract 2.2.0).
+    CHAT = "chat"
 
 
 class ErrorCode(str, Enum):
@@ -287,13 +295,23 @@ class AudioPayload(_RequestModel):
         return base64.b64decode(self.data_b64, validate=True)
 
 
+class ChatTurn(_RequestModel):
+    """One earlier message of the conversation (text only)."""
+
+    role: Literal["user", "assistant"]
+    text: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=MAX_TURN_CHARS)]
+
+
 class AnalyzeRequest(_RequestModel):
     """Body of ``POST /v1/analyze``."""
 
     request_id: UUID = Field(default_factory=uuid4)
     mode: AnalysisMode = AnalysisMode.EXPLAIN
-    image: ImagePayload
+    #: Required for every mode except ``chat``.
+    image: ImagePayload | None = None
     audio: AudioPayload | None = None
+    #: Earlier turns, oldest first, for follow-up questions. Text only and size-capped.
+    history: list[ChatTurn] = Field(default_factory=list, max_length=MAX_HISTORY_TURNS)
     prompt: Annotated[str, StringConstraints(strip_whitespace=True, max_length=MAX_PROMPT_CHARS)] = (
         ""
     )
@@ -308,9 +326,14 @@ class AnalyzeRequest(_RequestModel):
     client: ClientInfo | None = None
 
     @model_validator(mode="after")
-    def _voice_query_needs_audio(self) -> AnalyzeRequest:
-        if self.mode is AnalysisMode.VOICE_QUERY and self.audio is None and not self.prompt:
-            raise ValueError("mode 'voice_query' requires an audio clip or a transcribed prompt")
+    def _mode_requirements(self) -> AnalyzeRequest:
+        if self.image is None and self.mode is not AnalysisMode.CHAT:
+            raise ValueError(f"mode '{self.mode.value}' requires an image (only 'chat' may omit it)")
+        if self.mode in (AnalysisMode.VOICE_QUERY, AnalysisMode.CHAT) and self.audio is None and not self.prompt:
+            raise ValueError(f"mode '{self.mode.value}' requires an audio clip or a prompt")
+        total = sum(len(turn.text) for turn in self.history)
+        if total > MAX_HISTORY_CHARS:
+            raise ValueError(f"history is {total} characters; the limit is {MAX_HISTORY_CHARS}")
         return self
 
 

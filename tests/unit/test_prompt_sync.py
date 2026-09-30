@@ -38,6 +38,13 @@ def test_system_prompt_is_identical(ts_source: str) -> None:
     assert "\n".join(ts_strings(block)) == SYSTEM_PROMPT
 
 
+def test_chat_system_prompt_is_identical(ts_source: str) -> None:
+    from prompts import CHAT_SYSTEM_PROMPT
+
+    block = ts_block(ts_source, "export const CHAT_SYSTEM_PROMPT = [", '].join("\\n")')
+    assert "\n".join(ts_strings(block)) == CHAT_SYSTEM_PROMPT
+
+
 def test_mode_instructions_are_identical(ts_source: str) -> None:
     from omnisight_contracts import AnalysisMode
     from prompts import MODE_INSTRUCTIONS

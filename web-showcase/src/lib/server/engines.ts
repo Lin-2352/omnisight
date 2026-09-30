@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import type { AnalyzeRequest, AnalyzeResponse } from "../contracts";
 import { deriveSummary, extractCodeBlocks } from "../markdown";
 import { presetBySha256 } from "../presets";
-import { SYSTEM_PROMPT, userText } from "./prompts";
+import { systemPromptFor, userText } from "./prompts";
 
 export const DEFAULT_FALLBACK_MODEL = "gemini-2.5-flash";
 /** Tried in order on 503/429; FALLBACK_MODEL may be a comma-separated list. */
@@ -116,10 +116,31 @@ export function geminiGenerationConfig(model: string, request: AnalyzeRequest): 
   return { ...base, maxOutputTokens: answerTokens + THINKING_HEADROOM_TOKENS };
 }
 
+/**
+ * Earlier turns as Gemini ``contents``. Gemini needs strictly alternating user/model turns that start
+ * with a user turn, so leading assistant turns are dropped and consecutive same-role turns are joined.
+ */
+export function historyContents(request: AnalyzeRequest): { role: "user" | "model"; parts: { text: string }[] }[] {
+  const turns: { role: "user" | "model"; parts: { text: string }[] }[] = [];
+  for (const turn of request.history ?? []) {
+    const role = turn.role === "assistant" ? "model" : "user";
+    const last = turns[turns.length - 1];
+    if (last && last.role === role) {
+      last.parts = [{ text: `${last.parts[0]?.text ?? ""}\n\n${turn.text}` }];
+    } else if (last || role === "user") {
+      turns.push({ role, parts: [{ text: turn.text }] });
+    }
+  }
+  // The final request turn is a user turn, so history must end with a model turn.
+  if (turns[turns.length - 1]?.role === "user") turns.pop();
+  return turns;
+}
+
 export async function analyzeWithGemini(request: AnalyzeRequest, apiKey: string, timeoutMs: number): Promise<AnalyzeResponse> {
   const models = geminiModels();
   const base = (process.env.GEMINI_API_BASE || "https://generativelanguage.googleapis.com").replace(/\/+$/, "");
-  const parts: Record<string, unknown>[] = [{ inline_data: { mime_type: request.image.mime, data: request.image.data_b64 } }];
+  const parts: Record<string, unknown>[] = [];
+  if (request.image) parts.push({ inline_data: { mime_type: request.image.mime, data: request.image.data_b64 } });
   if (request.audio) parts.push({ inline_data: { mime_type: "audio/wav", data: request.audio.data_b64 } });
   parts.push({ text: userText(request.mode ?? "explain", request.prompt ?? "") });
   const started = Date.now();
@@ -135,8 +156,8 @@ export async function analyzeWithGemini(request: AnalyzeRequest, apiKey: string,
         method: "POST",
         headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
         body: JSON.stringify({
-          systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-          contents: [{ role: "user", parts }],
+          systemInstruction: { parts: [{ text: systemPromptFor(Boolean(request.image)) }] },
+          contents: [...historyContents(request), { role: "user", parts }],
           generationConfig: geminiGenerationConfig(model, request),
         }),
         signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())),
@@ -162,8 +183,21 @@ export async function analyzeWithGemini(request: AnalyzeRequest, apiKey: string,
 
 // --- Tier 3: deterministic --------------------------------------------------------------------
 
-export function analyzeDeterministic(request: AnalyzeRequest, imageBytes: Buffer): { response: AnalyzeResponse; matched: string | null } {
+export function analyzeDeterministic(request: AnalyzeRequest, imageBytes: Buffer | null): { response: AnalyzeResponse; matched: string | null } {
   const started = Date.now();
+  if (imageBytes === null) {
+    const markdown = [
+      "No live model is reachable right now, so this message could not be answered.",
+      "",
+      "The Kaggle GPU node sleeps between sessions and the cloud fallback is unavailable for this deployment right now. Nothing was guessed.",
+      "",
+      "- Start a local node from the OmniSight window, or try again when the status badge shows the Kaggle GPU online.",
+    ].join("\n");
+    return {
+      response: buildResponse(request, markdown, "deterministic", "omnisight-demo/offline", Date.now() - started, 0, null),
+      matched: null,
+    };
+  }
   const digest = createHash("sha256").update(imageBytes).digest("hex");
   const preset = presetBySha256(digest);
   if (preset) {

@@ -8,9 +8,10 @@ vision tokens precede the instruction, then the text.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from typing import Any, Final
 
-from omnisight_contracts import MAX_PROMPT_CHARS, AnalysisMode
+from omnisight_contracts import MAX_PROMPT_CHARS, AnalysisMode, ChatTurn
 
 SYSTEM_PROMPT: Final[str] = (
     "You are OmniSight, an assistant that reads screenshots of a software developer's "
@@ -33,6 +34,19 @@ SYSTEM_PROMPT: Final[str] = (
 # telling it to ignore on-screen instructions did not help (5/5 and 4/4 hijacked in small
 # samples), so none is included. Gemini and the local 2B resisted the same screen.
 
+#: System prompt when there is no screenshot (mode ``chat``): a general, concise assistant.
+CHAT_SYSTEM_PROMPT: Final[str] = (
+    "You are OmniSight, a helpful assistant for a software developer.\n"
+    "Rules:\n"
+    "1. Start with one plain sentence that answers the question or states the main point.\n"
+    "2. Use GitHub-flavored Markdown. Put every code snippet or command in a fenced code block "
+    "tagged with its language.\n"
+    "3. You cannot see the user's screen in this conversation and you have no internet access. "
+    "If the answer depends on the screen or on current information, say so instead of guessing.\n"
+    "4. Use earlier messages of the conversation for follow-up questions.\n"
+    "5. Be concise."
+)
+
 MODE_INSTRUCTIONS: Final[dict[AnalysisMode, str]] = {
     AnalysisMode.EXPLAIN: (
         "Explain what the code, error, or interface in this screenshot does. Cover the key "
@@ -53,6 +67,7 @@ MODE_INSTRUCTIONS: Final[dict[AnalysisMode, str]] = {
         "The user asked the question below out loud while looking at this screen. Answer it "
         "using the screenshot."
     ),
+    AnalysisMode.CHAT: "Answer the user's message below.",
 }
 
 
@@ -92,18 +107,27 @@ def compose_user_text(mode: AnalysisMode, prompt: str, transcript: str | None) -
     return text[: MAX_PROMPT_CHARS * 3]
 
 
-def build_messages(mode: AnalysisMode, prompt: str, transcript: str | None = None) -> list[dict[str, Any]]:
-    """Build the chat messages for one screenshot analysis."""
-    return [
-        {"role": "system", "content": [{"type": "text", "text": SYSTEM_PROMPT}]},
-        {
-            "role": "user",
-            "content": [
-                {"type": "image"},
-                {"type": "text", "text": compose_user_text(mode, prompt, transcript)},
-            ],
-        },
-    ]
+def build_messages(
+    mode: AnalysisMode,
+    prompt: str,
+    transcript: str | None = None,
+    history: Sequence[ChatTurn] = (),
+    *,
+    has_image: bool = True,
+) -> list[dict[str, Any]]:
+    """Build the chat messages: system prompt, earlier turns (text only), then this request.
+
+    Earlier turns contain model output as well as user text, so both go through
+    ``sanitize_user_text``: neither can spell a chat-template control token.
+    """
+    system = SYSTEM_PROMPT if has_image else CHAT_SYSTEM_PROMPT
+    messages: list[dict[str, Any]] = [{"role": "system", "content": [{"type": "text", "text": system}]}]
+    for turn in history:
+        messages.append({"role": turn.role, "content": [{"type": "text", "text": sanitize_user_text(turn.text)}]})
+    current: list[dict[str, Any]] = [{"type": "image"}] if has_image else []
+    current.append({"type": "text", "text": compose_user_text(mode, prompt, transcript)})
+    messages.append({"role": "user", "content": current})
+    return messages
 
 
 WARMUP_MESSAGES: Final[list[dict[str, Any]]] = [

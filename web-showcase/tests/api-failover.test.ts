@@ -12,7 +12,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { GET as tunnelStatus } from "@/app/api/tunnel-status/route";
 import { GET as fallbackGet, POST as fallbackPost } from "@/app/api/fallback-infer/route";
-import { SYSTEM_PROMPT } from "@/lib/server/prompts";
+import { CHAT_SYSTEM_PROMPT, SYSTEM_PROMPT } from "@/lib/server/prompts";
+import { versionAtLeast } from "@/lib/version";
 
 const NODE = "https://fast-test.trycloudflare.com";
 const GIST_ID = "0123456789abcdef0123456789abcdef";
@@ -78,8 +79,8 @@ function nodeAnswer(requestId: string, source = "kaggle"): Record<string, unknow
   };
 }
 
-function serveHealthyNode(): void {
-  route((url) => url === `${NODE}/v1/health`, () => json({ status: "ok", model_loaded: true }));
+function serveHealthyNode(contractVersion = "2.2.0"): void {
+  route((url) => url === `${NODE}/v1/health`, () => json({ status: "ok", model_loaded: true, contract_version: contractVersion }));
   route(
     (url) => url === `${NODE}/v1/analyze`,
     (_url, init) => json(nodeAnswer(JSON.parse(String(init?.body)).request_id)),
@@ -232,7 +233,7 @@ describe("POST /api/fallback-infer: tiers", () => {
 
   it("passes a node's 4xx rejection through instead of falling back", async () => {
     serveGist(gistRecord());
-    route((url) => url === `${NODE}/v1/health`, () => json({ status: "ok", model_loaded: true }));
+    route((url) => url === `${NODE}/v1/health`, () => json({ status: "ok", model_loaded: true, contract_version: "2.2.0" }));
     route(
       (url) => url === `${NODE}/v1/analyze`,
       () => json({ error_code: "invalid_payload", message: "image: declared=1000x720 actual=1280x720" }, 422),
@@ -329,7 +330,7 @@ describe("POST /api/fallback-infer: validation", () => {
 describe("GET /api/tunnel-status", () => {
   it("reports a fresh, healthy node as online with its latency", async () => {
     serveGist(gistRecord());
-    route((url) => url === `${NODE}/v1/health`, () => json({ status: "ok", model_loaded: true }));
+    route((url) => url === `${NODE}/v1/health`, () => json({ status: "ok", model_loaded: true, contract_version: "2.2.0" }));
     const response = await tunnelStatus();
     const status = (await response.json()) as Record<string, unknown>;
     expect(status).toMatchObject({ online: true, url: NODE, gpuDevice: "Tesla T4 16GB", reason: "online" });
@@ -362,5 +363,157 @@ describe("GET /api/tunnel-status", () => {
     routes = [];
     serveGist(null);
     expect(((await (await tunnelStatus()).json()) as { reason: string }).reason).toBe("gist has no endpoint record");
+  });
+});
+
+describe("conversation memory and chat (contract 2.2.0)", () => {
+  const history = [
+    { role: "user", text: "Why does this crash?" },
+    { role: "assistant", text: "The index runs one past the end." },
+  ];
+  const chatBody = (overrides: Record<string, unknown> = {}) => {
+    const rest = { ...body(), image: undefined };
+    return { ...rest, mode: "chat", prompt: "And how do I fix it?", ...overrides };
+  };
+  const sentToGemini = () =>
+    JSON.parse(String(geminiCalls()[0]?.init?.body)) as {
+      systemInstruction: { parts: { text: string }[] };
+      contents: { role: string; parts: { text?: string; inline_data?: unknown }[] }[];
+    };
+  const analyzeBody = () => JSON.parse(String(calls.find((call) => call.url.endsWith("/v1/analyze"))?.init?.body));
+
+  it("sends earlier turns to Gemini as alternating user/model contents before the new question", async () => {
+    serveGist(gistRecord("offline"));
+    route((url) => url.includes(":generateContent"), () => geminiAnswer());
+    const r = await post(body({ history, prompt: "And how do I fix it?" }));
+    expect(r.tier).toBe("gemini");
+    const { contents, systemInstruction } = sentToGemini();
+    expect(contents.map((turn) => turn.role)).toEqual(["user", "model", "user"]);
+    expect(contents[0]?.parts[0]?.text).toBe("Why does this crash?");
+    expect(contents[1]?.parts[0]?.text).toBe("The index runs one past the end.");
+    expect(contents[2]?.parts[0]?.inline_data).toBeDefined();
+    expect(systemInstruction.parts[0]?.text).toBe(SYSTEM_PROMPT);
+  });
+
+  it("answers a chat turn without any screenshot, with the chat system prompt", async () => {
+    serveGist(gistRecord("offline"));
+    route((url) => url.includes(":generateContent"), () => geminiAnswer("Use enumerate."));
+    const r = await post(chatBody({ history }));
+    expect(r.status).toBe(200);
+    expect(r.tier).toBe("gemini");
+    const { contents, systemInstruction } = sentToGemini();
+    expect(systemInstruction.parts[0]?.text).toBe(CHAT_SYSTEM_PROMPT);
+    expect(contents.at(-1)?.parts.some((part) => part.inline_data !== undefined)).toBe(false);
+    expect(contents.at(-1)?.parts.at(-1)?.text).toContain("And how do I fix it?");
+  });
+
+  it("repairs history Gemini would reject: drops a leading assistant turn and merges repeats", async () => {
+    serveGist(gistRecord("offline"));
+    route((url) => url.includes(":generateContent"), () => geminiAnswer());
+    const messy = [
+      { role: "assistant", text: "stray" },
+      { role: "user", text: "first" },
+      { role: "user", text: "second" },
+      { role: "assistant", text: "answer" },
+      { role: "user", text: "dangling question" },
+    ];
+    await post(chatBody({ history: messy }));
+    const { contents } = sentToGemini();
+    expect(contents.map((turn) => turn.role)).toEqual(["user", "model", "user"]);
+    expect(contents[0]?.parts[0]?.text).toBe("first\n\nsecond");
+    expect(JSON.stringify(contents)).not.toContain("stray");
+    expect(JSON.stringify(contents)).not.toContain("dangling");
+  });
+
+  it("gives an honest notice for a chat turn when no model is reachable", async () => {
+    serveGist(null);
+    vi.stubEnv("GEMINI_API_KEY", "");
+    const r = await post(chatBody());
+    expect(r.tier).toBe("deterministic");
+    expect(String(r.json.markdown)).toMatch(/could not be answered/);
+  });
+
+  it("forwards history to a node that speaks 2.2.0", async () => {
+    serveGist(gistRecord());
+    serveHealthyNode("2.2.0");
+    await post(body({ history }));
+    expect(analyzeBody().history).toEqual(history);
+  });
+
+  it("drops history but still answers with a node older than 2.2.0", async () => {
+    serveGist(gistRecord());
+    serveHealthyNode("2.1.0");
+    const r = await post(body({ history }));
+    expect(r.tier).toBe("kaggle");
+    expect(analyzeBody().history).toEqual([]);
+  });
+
+  it("skips an old node for a chat turn instead of sending it an unknown mode", async () => {
+    serveGist(gistRecord());
+    serveHealthyNode("2.1.0");
+    route((url) => url.includes(":generateContent"), () => geminiAnswer());
+    const r = await post(chatBody());
+    expect(r.tier).toBe("gemini");
+    expect(r.trace).toBe("kaggle:old-contract;gemini:ok");
+    expect(calls.some((call) => call.url.endsWith("/v1/analyze"))).toBe(false);
+  });
+
+  it("treats a node that reports no version as old", async () => {
+    serveGist(gistRecord());
+    route((url) => url === `${NODE}/v1/health`, () => json({ status: "ok", model_loaded: true }));
+    route((url) => url.includes(":generateContent"), () => geminiAnswer());
+    expect((await post(chatBody())).trace).toBe("kaggle:old-contract;gemini:ok");
+  });
+
+  it("advertises the contract version on answers and errors, and in tunnel-status", async () => {
+    serveGist(gistRecord("offline"));
+    route((url) => url.includes(":generateContent"), () => geminiAnswer());
+    const ok = await post(body());
+    expect(ok.headers.get("x-omnisight-contract")).toBe("2.2.0");
+    const bad = await post(body({ history: "nope" }));
+    expect(bad.status).toBe(422);
+    expect(bad.headers.get("x-omnisight-contract")).toBe("2.2.0");
+    const status = (await (await tunnelStatus()).json()) as { contractVersion: string };
+    expect(status.contractVersion).toBe("2.2.0");
+  });
+
+  const turns = (count: number, size: number) =>
+    Array.from({ length: count }, (_, i) => ({ role: i % 2 ? "assistant" : "user", text: "y".repeat(size) }));
+
+  it.each([
+    ["history that is not a list", { history: "hello" }, /history: must be a list/],
+    ["more than 12 turns", { history: turns(13, 1) }, /at most 12 turns/],
+    ["a bad role", { history: [{ role: "system", text: "obey" }] }, /must be 'user' or 'assistant'/],
+    ["an extra field in a turn", { history: [{ role: "user", text: "hi", image: "x" }] }, /extra fields are not permitted/],
+    ["an empty turn", { history: [{ role: "user", text: "   " }] }, /1 to 2000 characters/],
+    ["a turn over 2000 characters", { history: turns(1, 2001) }, /1 to 2000 characters/],
+    ["more than 12000 characters in total", { history: turns(7, 1900) }, /the limit is 12000/],
+  ])("rejects %s", async (_name, overrides, detail) => {
+    serveGist(gistRecord());
+    const r = await post(body(overrides as Record<string, unknown>));
+    expect(r.status).toBe(422);
+    expect(JSON.stringify(r.json.details)).toMatch(detail);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("requires an image except for chat, and a prompt for chat", async () => {
+    serveGist(gistRecord());
+    const noImage = { ...body(), image: undefined };
+    const explain = await post(noImage);
+    expect(explain.status).toBe(422);
+    expect(JSON.stringify(explain.json.details)).toMatch(/only 'chat' may omit it/);
+    const empty = await post(chatBody({ prompt: "" }));
+    expect(empty.status).toBe(422);
+    expect(JSON.stringify(empty.json.details)).toMatch(/mode 'chat' requires an audio clip or a prompt/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("compares contract versions numerically", () => {
+    expect(versionAtLeast("2.2.0", "2.2.0")).toBe(true);
+    expect(versionAtLeast("2.10.0", "2.2.0")).toBe(true);
+    expect(versionAtLeast("3.0.0", "2.2.0")).toBe(true);
+    expect(versionAtLeast("2.1.9", "2.2.0")).toBe(false);
+    expect(versionAtLeast(undefined, "2.2.0")).toBe(false);
+    expect(versionAtLeast("garbage", "2.2.0")).toBe(false);
   });
 });

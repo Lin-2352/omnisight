@@ -7,7 +7,8 @@
         "debug",
         "summarize",
         "ocr",
-        "voice_query"
+        "voice_query",
+        "chat"
       ],
       "title": "AnalysisMode",
       "type": "string"
@@ -48,6 +49,32 @@
         "duration_ms"
       ],
       "title": "AudioPayload",
+      "type": "object"
+    },
+    "ChatTurn": {
+      "additionalProperties": false,
+      "description": "One earlier message of the conversation (text only).",
+      "properties": {
+        "role": {
+          "enum": [
+            "user",
+            "assistant"
+          ],
+          "title": "Role",
+          "type": "string"
+        },
+        "text": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "role",
+        "text"
+      ],
+      "title": "ChatTurn",
       "type": "object"
     },
     "ClientInfo": {
@@ -151,8 +178,24 @@
       ],
       "default": null
     },
+    "history": {
+      "items": {
+        "$ref": "#/$defs/ChatTurn"
+      },
+      "maxItems": 12,
+      "title": "History",
+      "type": "array"
+    },
     "image": {
-      "$ref": "#/$defs/ImagePayload"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ImagePayload"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     },
     "max_new_tokens": {
       "default": 512,
@@ -185,11 +228,8 @@
       "type": "number"
     }
   },
-  "required": [
-    "image"
-  ],
   "title": "AnalyzeRequest",
   "type": "object",
-  "x-contract-version": "2.1.0",
+  "x-contract-version": "2.2.0",
   "x-generated-by": "omnisight_contracts.export_schema (do not edit by hand)"
 }

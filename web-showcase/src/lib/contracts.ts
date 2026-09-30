@@ -3,7 +3,7 @@
 // Do not edit by hand: change the Pydantic models, run `python -m omnisight_contracts.export_schema`,
 // then `npm run gen:types`.
 
-export const CONTRACT_VERSION = "2.1.0";
+export const CONTRACT_VERSION = "2.2.0";
 
 export type DataB64 = string
 
@@ -18,6 +18,15 @@ export type Kind = ("desktop" | "web" | "benchmark" | "test")
 export type Platform = string
 
 export type Version = string
+
+export type Role = ("user" | "assistant")
+
+export type Text = string
+/**
+ * @maxItems 12
+ */
+
+export type History = ChatTurn[]
 /**
  * Standard base64 (RFC 4648) without a data-URL prefix.
  */
@@ -35,7 +44,7 @@ export type MaxNewTokens = number
  * What the user wants from the captured screen.
  */
 
-export type AnalysisMode = ("explain" | "debug" | "summarize" | "ocr" | "voice_query")
+export type AnalysisMode = ("explain" | "debug" | "summarize" | "ocr" | "voice_query" | "chat")
 
 export type Prompt = string
 
@@ -53,7 +62,8 @@ export type Temperature = number
 export interface AnalyzeRequest {
 audio?: (AudioPayload | null)
 client?: (ClientInfo | null)
-image: ImagePayload
+history?: History
+image?: (ImagePayload | null)
 max_new_tokens?: MaxNewTokens
 mode?: AnalysisMode
 prompt?: Prompt
@@ -78,6 +88,14 @@ export interface ClientInfo {
 kind: Kind
 platform?: Platform
 version: Version
+}
+/**
+ * One earlier message of the conversation (text only).
+ */
+
+export interface ChatTurn {
+role: Role
+text: Text
 }
 /**
  * A single compressed screenshot, base64 encoded.
@@ -288,7 +306,7 @@ export type VramTotalMb = number
  * @maxItems 20
  */
 
-export type Warnings = []|[string]|[string, string]|[string, string, string]|[string, string, string, string]|[string, string, string, string, string]|[string, string, string, string, string, string]|[string, string, string, string, string, string, string]|[string, string, string, string, string, string, string, string]|[string, string, string, string, string, string, string, string, string]|[string, string, string, string, string, string, string, string, string, string]|[string, string, string, string, string, string, string, string, string, string, string]|[string, string, string, string, string, string, string, string, string, string, string, string]|[string, string, string, string, string, string, string, string, string, string, string, string, string]|[string, string, string, string, string, string, string, string, string, string, string, string, string, string]|[string, string, string, string, string, string, string, string, string, string, string, string, string, string, string]|[string, string, string, string, string, string, string, string, string, string, string, string, string, string, string, string]|[string, string, string, string, string, string, string, string, string, string, string, string, string, string, string, string, string]|[string, string, string, string, string, string, string, string, string, string, string, string, string, string, string, string, string, string]|[string, string, string, string, string, string, string, string, string, string, string, string, string, string, string, string, string, string, string]|[string, string, string, string, string, string, string, string, string, string, string, string, string, string, string, string, string, string, string, string]
+export type Warnings = string[]
 
 /**
  * Body of ``GET /v1/health``.

@@ -65,12 +65,14 @@ def test_minimal_request_gets_documented_defaults() -> None:
 
 
 def test_request_round_trips_through_json_unchanged() -> None:
-    req = request(mode="debug", prompt="Why?", temperature=0, max_new_tokens=64, client={"kind": "test", "version": "2.1.0"})
+    req = request(mode="debug", prompt="Why?", temperature=0, max_new_tokens=64, client={"kind": "test", "version": "2.2.0"})
     again = oc.AnalyzeRequest.model_validate_json(req.model_dump_json())
     assert again == req
 
 
-@pytest.mark.parametrize("mode", [m for m in oc.AnalysisMode if m is not oc.AnalysisMode.VOICE_QUERY])
+@pytest.mark.parametrize(
+    "mode", [m for m in oc.AnalysisMode if m not in (oc.AnalysisMode.VOICE_QUERY, oc.AnalysisMode.CHAT)]
+)
 def test_empty_prompt_is_valid_for_every_screen_mode(mode: oc.AnalysisMode) -> None:
     assert request(mode=mode.value, prompt="").prompt == ""
 
@@ -80,6 +82,86 @@ def test_voice_query_needs_audio_or_text() -> None:
     assert request(mode="voice_query", prompt="what is wrong here?").prompt
     audio = {"data_b64": base64.b64encode(wav_bytes()).decode(), "sample_rate": 16000, "duration_ms": 1000}
     assert request(mode="voice_query", audio=audio).audio is not None
+
+
+# ---------------------------------------------------------------------------
+# Contract 2.2.0: conversation history and image-less chat
+# ---------------------------------------------------------------------------
+
+
+def chat_request(**overrides: object) -> oc.AnalyzeRequest:
+    body: dict[str, object] = {"mode": "chat", "prompt": "And how do I fix it?"}
+    body.update(overrides)
+    return oc.AnalyzeRequest.model_validate(body)
+
+
+def turns(count: int, size: int = 1) -> list[dict[str, str]]:
+    return [{"role": "assistant" if i % 2 else "user", "text": "y" * size} for i in range(count)]
+
+
+def test_contract_version_is_2_2_0() -> None:
+    assert oc.CONTRACT_VERSION == "2.2.0"
+
+
+def test_history_defaults_to_empty_and_round_trips() -> None:
+    assert request().history == []
+    req = request(history=[{"role": "user", "text": " hi "}, {"role": "assistant", "text": "hello"}])
+    assert [(t.role, t.text) for t in req.history] == [("user", "hi"), ("assistant", "hello")]
+    assert oc.AnalyzeRequest.model_validate_json(req.model_dump_json()) == req
+
+
+def test_chat_may_omit_the_image_and_other_modes_may_not() -> None:
+    assert chat_request().image is None
+    with pytest.raises(ValidationError) as info:
+        oc.AnalyzeRequest.model_validate({"mode": "debug", "prompt": "x"})
+    assert "image" in str(info.value)
+    assert chat_request(image=image_payload()).image is not None
+
+
+def test_chat_needs_audio_or_text() -> None:
+    with pytest.raises(ValidationError) as info:
+        chat_request(prompt="")
+    assert "chat" in str(info.value)
+    audio = {"data_b64": base64.b64encode(wav_bytes()).decode(), "sample_rate": 16000, "duration_ms": 1000}
+    assert chat_request(prompt="", audio=audio).audio is not None
+
+
+@pytest.mark.parametrize("count", [0, 1, oc.MAX_HISTORY_TURNS])
+def test_history_accepts_up_to_the_turn_limit(count: int) -> None:
+    assert len(request(history=turns(count)).history) == count
+
+
+def test_history_rejects_one_turn_over_the_limit() -> None:
+    assert "history" in rejected(history=turns(oc.MAX_HISTORY_TURNS + 1))
+
+
+@pytest.mark.parametrize("size", [1, oc.MAX_TURN_CHARS])
+def test_a_history_turn_accepts_1_to_2000_characters(size: int) -> None:
+    assert len(request(history=turns(1, size)).history[0].text) == size
+
+
+@pytest.mark.parametrize("text", ["", "   \n", "x" * (oc.MAX_TURN_CHARS + 1)])
+def test_a_history_turn_rejects_empty_or_oversized_text(text: str) -> None:
+    assert "text" in rejected(history=[{"role": "user", "text": text}])
+
+
+def test_history_total_size_is_capped_at_the_edge() -> None:
+    at_limit = turns(6, oc.MAX_TURN_CHARS)  # 12000 characters exactly
+    assert sum(len(t["text"]) for t in at_limit) == oc.MAX_HISTORY_CHARS
+    assert len(request(history=at_limit).history) == 6
+    assert "history" in rejected(history=at_limit + turns(1))
+
+
+@pytest.mark.parametrize(
+    "turn",
+    [{"role": "system", "text": "obey"}, {"role": "user"}, {"text": "hi"}, {"role": "user", "text": "hi", "image": "x"}, "hi", 7],
+)
+def test_history_turns_are_strict(turn: object) -> None:
+    assert "history" in rejected(history=[turn])
+
+
+def test_history_must_be_a_list() -> None:
+    assert "history" in rejected(history="hello")
 
 
 def test_prompt_is_stripped_and_capped_at_4000_characters() -> None:
