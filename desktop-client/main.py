@@ -37,8 +37,55 @@ from capture.screen import enable_dpi_awareness  # noqa: E402
 
 enable_dpi_awareness()
 
-from PyQt6.QtCore import QObject, QRunnable, QSettings, QThreadPool, QTimer, QUrl, pyqtSignal  # noqa: E402
-from PyQt6.QtGui import QAction, QActionGroup, QColor, QDesktopServices, QIcon, QPainter, QPen, QPixmap  # noqa: E402
+from capture.audio import (  # noqa: E402
+    MIC_SETTINGS_URI,
+    PERMISSION_MESSAGES,
+    AudioDeviceError,
+    AudioRecorder,
+    MicrophonePermissionError,
+    NoSpeechError,
+    RecordingResult,
+    microphone_permission,
+)
+from capture.screen import BlackFrameError, CaptureResult, ScreenCapturer  # noqa: E402
+from core.capability import describe, probe  # noqa: E402
+from core.config import (  # noqa: E402
+    BACKENDS,
+    ENGINE_CHOICES,
+    LOCAL_DEVICES,
+    ClientSettings,
+    EndpointResolver,
+)
+from core.foreground import POLL_INTERVAL_MS, ForegroundTracker  # noqa: E402
+from core.logger import configure_logging, default_log_dir, get_logger  # noqa: E402
+from core.node_supervisor import NodeError, NodeState, NodeSupervisor, repo_root  # noqa: E402
+from core.state import AppState, StateMachine  # noqa: E402
+from network.client import HealthCheckWorker, InferenceWorker, build_request  # noqa: E402
+from network.schemas import (  # noqa: E402
+    CONTRACT_VERSION,
+    AnalysisMode,
+    ClientResult,
+    LatencyMetrics,
+)
+from PyQt6.QtCore import (  # noqa: E402
+    QObject,
+    QRunnable,
+    QSettings,
+    QThreadPool,
+    QTimer,
+    QUrl,
+    pyqtSignal,
+)
+from PyQt6.QtGui import (  # noqa: E402
+    QAction,
+    QActionGroup,
+    QColor,
+    QDesktopServices,
+    QIcon,
+    QPainter,
+    QPen,
+    QPixmap,
+)
 from PyQt6.QtWidgets import (  # noqa: E402
     QApplication,
     QComboBox,
@@ -52,26 +99,9 @@ from PyQt6.QtWidgets import (  # noqa: E402
     QSystemTrayIcon,
     QVBoxLayout,
 )
-
-from capture.audio import (  # noqa: E402
-    MIC_SETTINGS_URI,
-    PERMISSION_MESSAGES,
-    AudioDeviceError,
-    AudioRecorder,
-    MicrophonePermissionError,
-    NoSpeechError,
-    RecordingResult,
-    microphone_permission,
-)
-from capture.screen import BlackFrameError, CaptureResult, ScreenCapturer  # noqa: E402
-from core.capability import describe, probe  # noqa: E402
-from core.config import BACKENDS, ClientSettings, EndpointResolver  # noqa: E402
-from core.logger import configure_logging, default_log_dir, get_logger  # noqa: E402
-from core.state import AppState, StateMachine  # noqa: E402
-from network.client import HealthCheckWorker, InferenceWorker, build_request  # noqa: E402
-from network.schemas import CONTRACT_VERSION, AnalysisMode, ClientResult, LatencyMetrics  # noqa: E402
 from ui.components import BASE, BLUE, GREEN, SURFACE0, TEXT  # noqa: E402
 from ui.hud import HudWindow  # noqa: E402
+from ui.main_window import MainWindow  # noqa: E402
 
 logger = get_logger("main")
 
@@ -273,10 +303,16 @@ class CaptureSignals(QObject):
 class CaptureTask(QRunnable):
     """Screen grab + encode (and, for voice, stop/trim/encode the recording) off the GUI thread."""
 
-    def __init__(self, capturer: ScreenCapturer, recorder: AudioRecorder | None = None) -> None:
+    def __init__(
+        self,
+        capturer: ScreenCapturer,
+        recorder: AudioRecorder | None = None,
+        point: tuple[int, int] | None = None,
+    ) -> None:
         super().__init__()
         self.capturer = capturer
         self.recorder = recorder
+        self.point = point  # the user's window, so OmniSight's own window never picks the monitor
         self.signals = CaptureSignals()
         self.setAutoDelete(True)
 
@@ -285,9 +321,9 @@ class CaptureTask(QRunnable):
         try:
             if self.recorder is not None:
                 recording = self.recorder.stop_recording()
-            capture = self.capturer.capture()
+            capture = self.capturer.capture(point=self.point)
         except NoSpeechError as exc:
-            self.signals.failed.emit(f"No speech detected - hold Alt+V while you speak ({exc}).")
+            self.signals.failed.emit(f"No speech detected - speak while recording (hold Alt+V, or press Speak and then Stop and send) ({exc}).")
             return
         except AudioDeviceError as exc:
             self.signals.failed.emit(str(exc))
@@ -348,10 +384,10 @@ class SettingsDialog(QDialog):
         self.override.setPlaceholderText("https://<name>.trycloudflare.com (empty = use the gist)")
         form.addRow("Override URL:", self.override)
         self.backend = QComboBox()
-        for key, label in BACKENDS.items():
+        for key, (label, _backend, _device) in ENGINE_CHOICES.items():
             self.backend.addItem(label, key)
-        self.backend.setCurrentIndex(list(BACKENDS).index(controller.settings.backend))
-        form.addRow("Backend:", self.backend)
+        self.backend.setCurrentIndex(list(ENGINE_CHOICES).index(controller.settings.engine_choice))
+        form.addRow("Engine:", self.backend)
         self.local_url = QLineEdit(controller.settings.local_dev_url)
         self.local_url.setPlaceholderText("http://127.0.0.1:8000 (scripts\\run-local-gpu.ps1, GPU or -Device cpu)")
         form.addRow("Local node:", self.local_url)
@@ -381,7 +417,7 @@ class SettingsDialog(QDialog):
         try:
             self.controller.set_override(self.override.text())
             self.controller.set_local_url(self.local_url.text())
-            self.controller.set_backend(str(self.backend.currentData()))
+            self.controller.set_engine(str(self.backend.currentData()))
         except ValueError as exc:
             self.result_label.setText(str(exc))
             return
@@ -411,6 +447,13 @@ class OmniSightController(QObject):
         self.capturer = ScreenCapturer()
         self.recorder = AudioRecorder()
         self.hud = HudWindow()
+        self.window = MainWindow()
+        self.foreground = ForegroundTracker()
+        self.node = NodeSupervisor(repo_root(), settings.local_dev_url)
+        self._last_node_status: Any = None
+        self._origin = "hud"  # who asked: "hud" (hotkeys) or "window"
+        self._pending_prompt = ""
+        self._pending_question = ""
         self.pool = QThreadPool(self)
         self.pool.setMaxThreadCount(1)  # one capture thread keeps its warm mss instance
         self.pool.setExpiryTimeout(-1)  # never retire it (Qt's default is 30 s idle)
@@ -423,11 +466,20 @@ class OmniSightController(QObject):
 
         self.state.state_changed.connect(self._on_state_changed)
         self.hud.dismissed.connect(self.state.reset)
+        self.window.ask_requested.connect(self.on_window_ask)
+        self.window.capture_requested.connect(self.on_window_capture)
+        self.window.mic_clicked.connect(self.on_window_mic)
+        self.window.engine_selected.connect(self.set_engine)
+        self.window.node_toggle_clicked.connect(self.toggle_node)
+        self.window.clear_requested.connect(self.clear_history)
+        self.window.settings_requested.connect(self.open_settings)
+        self.window.set_engine(self.settings.engine_choice)
 
         self.tray = QSystemTrayIcon(make_tray_icon(), self)
         self.tray.setToolTip("OmniSight - Alt+C analyze, hold Alt+V to ask")
         menu = QMenu()
         for label, slot in (
+            ("Open OmniSight", self.open_window),
             ("Show HUD", self.show_hud),
             ("Clear History", self.clear_history),
             ("Settings", self.open_settings),
@@ -477,13 +529,26 @@ class OmniSightController(QObject):
 
         self.capability_line = ""
         self.pool.start(_WarmUp(self.capturer, self))
+        # The user's own window is remembered so clicking OmniSight never changes which monitor is captured.
+        self._foreground_timer = QTimer(self)
+        self._foreground_timer.timeout.connect(self.foreground.poll)
+        self._foreground_timer.start(POLL_INTERVAL_MS)
+        self._node_timer = QTimer(self)
+        self._node_timer.timeout.connect(self._refresh_node)
+        self._node_timer.start(1000)
+        self._refresh_node()
         logger.info("OmniSight client %s ready", CONTRACT_VERSION)
 
     # -- tray -----------------------------------------------------------------
 
     def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason in (QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick):
-            self.show_hud()
+            self.open_window()
+
+    def open_window(self) -> None:
+        self.window.show()
+        self.window.raise_()
+        self.window.activateWindow()
 
     def show_hud(self) -> None:
         latest = self.state.latest()
@@ -496,6 +561,7 @@ class OmniSightController(QObject):
 
     def clear_history(self) -> None:
         self.state.clear_history()
+        self.window.clear_exchanges()
         if not self.state.is_busy:
             self.state.reset()
             self.hud.show_state(AppState.IDLE)
@@ -520,13 +586,67 @@ class OmniSightController(QObject):
         if action is not None and not action.isChecked():
             action.setChecked(True)
         logger.info("backend set to %s", self.settings.backend)
+        self.window.set_engine(self.settings.engine_choice)
+        self._last_node_status = None
+        self._refresh_node()
         self.tray.showMessage(
             "OmniSight", f"Backend: {BACKENDS[self.settings.backend]}", QSystemTrayIcon.MessageIcon.Information, 2500
         )
 
+    def set_engine(self, key: str) -> None:
+        """Pick where answers come from: Auto, Kaggle, or this PC's GPU / CPU (window or Settings)."""
+        self.settings = self.settings.with_engine_choice(key)
+        self.resolver.update_settings(self.settings)
+        saved = QSettings()
+        saved.setValue("backend", self.settings.backend)
+        saved.setValue("local_device", self.settings.local_device)
+        action = self._backend_actions.get(self.settings.backend)
+        if action is not None and not action.isChecked():
+            action.setChecked(True)
+        self.window.set_engine(key)
+        logger.info("engine set to %s (%s)", key, ENGINE_CHOICES[key][0])
+        status = self.node.status
+        if (
+            key in ("local_gpu", "local_cpu")
+            and status.owned
+            and status.state in (NodeState.STARTING, NodeState.READY)
+            and status.requested_device != self.settings.local_device
+        ):
+            self._start_node()  # the node this app started is on the other device: restart it
+            return
+        self._last_node_status = None
+        self._refresh_node()
+
+    # -- local node (started and stopped from the window) ------------------------------------------------
+
+    def _start_node(self) -> None:
+        try:
+            self.node.set_url(self.settings.local_dev_url)
+            self.node.start(self.settings.local_device)
+        except NodeError as exc:
+            self.window.show_notice(str(exc), error=True)
+        self._last_node_status = None
+        self._refresh_node()
+
+    def toggle_node(self) -> None:
+        status = self.node.status
+        if status.owned and status.state in (NodeState.STARTING, NodeState.READY):
+            self.node.stop()
+            self._last_node_status = None
+            self._refresh_node()
+        else:
+            self._start_node()
+
+    def _refresh_node(self) -> None:
+        status = self.node.refresh()
+        if status != self._last_node_status:
+            self._last_node_status = status
+            self.window.set_node_status(status, self.settings.engine_choice)
+
     def set_local_url(self, url: str) -> None:
         self.settings = self.settings.with_local_url(url)
         self.resolver.update_settings(self.settings)
+        self.node.set_url(self.settings.local_dev_url)
         QSettings().setValue("local_url", self.settings.local_dev_url)
 
     # -- hotkeys ----------------------------------------------------------------
@@ -535,14 +655,41 @@ class OmniSightController(QObject):
         if self.state.is_busy:
             logger.info("Alt+C ignored: %s", self.state.state.value)
             return
+        self._origin, self._pending_prompt, self._pending_question = "hud", "", ""
         self._pending_mode = AnalysisMode.DEBUG
         self.state.transition(AppState.CAPTURING, reason="Alt+C")
         self._start_capture(None)
 
-    def on_voice_pressed(self) -> None:
+    # -- window actions (the same pipeline, started with the mouse) ------------------------------------------
+
+    def on_window_ask(self, text: str) -> None:
+        self._begin_window_request(AnalysisMode.EXPLAIN, text)
+
+    def on_window_capture(self) -> None:
+        self._begin_window_request(AnalysisMode.DEBUG, "")
+
+    def _begin_window_request(self, mode: AnalysisMode, prompt: str) -> None:
+        if self.state.is_busy:
+            return
+        self._origin, self._pending_prompt, self._pending_question = "window", prompt, prompt
+        self._pending_mode = mode
+        self.state.transition(AppState.CAPTURING, reason="window")
+        self._start_capture(None)
+
+    def on_window_mic(self) -> None:
+        """Click to start listening, click again to stop and send (Alt+V is hold-to-talk)."""
+        if self.state.state is AppState.RECORDING_VOICE:
+            self.on_voice_released()
+        else:
+            typed = self.window.ask_box.text().strip()
+            self.window.ask_box.clear()
+            self.on_voice_pressed(origin="window", prompt=typed)
+
+    def on_voice_pressed(self, origin: str = "hud", prompt: str = "") -> None:
         if self.state.is_busy:
             logger.info("Alt+V ignored: %s", self.state.state.value)
             return
+        self._origin, self._pending_prompt, self._pending_question = origin, prompt, prompt
         try:
             self.recorder.start_recording()
         except MicrophonePermissionError as exc:
@@ -595,7 +742,7 @@ class OmniSightController(QObject):
     # -- pipeline ---------------------------------------------------------------
 
     def _start_capture(self, recorder: AudioRecorder | None) -> None:
-        task = CaptureTask(self.capturer, recorder)
+        task = CaptureTask(self.capturer, recorder, self.foreground.capture_point())
         task.signals.finished.connect(self._on_capture_finished)
         task.signals.failed.connect(self.state.fail)
         self.pool.start(task)
@@ -609,6 +756,7 @@ class OmniSightController(QObject):
                 mode=self._pending_mode,
                 audio_wav=recording.wav_bytes if recording else None,
                 audio_duration_ms=recording.duration_ms if recording else None,
+                prompt=self._pending_prompt,
                 max_new_tokens=self.settings.max_new_tokens,
             )
         except ValueError as exc:
@@ -619,7 +767,8 @@ class OmniSightController(QObject):
             encode_ms=capture.encode_latency_ms,
             audio_ms=float(recording.duration_ms) if recording else 0.0,
         )
-        self.hud.place_on_screen(capture.monitor_rect, capture.monitor_device)
+        if self._origin == "hud":
+            self.hud.place_on_screen(capture.monitor_rect, capture.monitor_device)
         self.state.transition(AppState.ANALYZING, reason=f"{capture.scaled_res} {capture.payload_bytes // 1024} KB")
         worker = InferenceWorker(self.settings, self.resolver, request, metrics)
         worker.succeeded.connect(self._on_inference_succeeded)
@@ -637,10 +786,22 @@ class OmniSightController(QObject):
     def _on_inference_succeeded(self, payload: dict[str, Any]) -> None:
         result = ClientResult.model_validate(payload)
         self.state.add_result(result.response, result.metrics)
+        self.window.add_exchange(self._pending_question, result)
         if self.state.transition(AppState.DISPLAYING, reason=result.metrics.tier or ""):
-            self.hud.show_result(result)
+            if self._origin == "hud":
+                self.hud.show_result(result)
+            else:
+                self.state.reset()  # the answer is in the window; nothing to dismiss
 
     def _on_state_changed(self, old: AppState, new: AppState) -> None:
+        self.window.set_app_state(new, WINDOW_MESSAGES.get(new, ""))
+        if new is AppState.ERROR:
+            self.window.show_notice(self.state.last_error or "Something went wrong.", error=True)
+            if self._origin != "hud":
+                self._error_actions = []
+                return
+        elif self._origin != "hud":
+            return
         if new is AppState.RECORDING_VOICE:
             self.hud.place_on_screen(None)
             self.hud.show_state(new, "Listening… release Alt+V to send your question with the screen.")
@@ -660,6 +821,9 @@ class OmniSightController(QObject):
 
     def shutdown(self) -> None:
         logger.info("shutting down")
+        self._foreground_timer.stop()
+        self._node_timer.stop()
+        self.node.shutdown()  # stops a node this app started; an adopted one is left alone
         self.hotkeys.stop()
         self.recorder.close()
         worker = self._worker
@@ -670,6 +834,14 @@ class OmniSightController(QObject):
         self.capturer.close()
         self.tray.hide()
         self.hud.hide()
+        self.window.hide()
+
+
+WINDOW_MESSAGES: Final[dict[AppState, str]] = {
+    AppState.CAPTURING: "Capturing the screen…",
+    AppState.ANALYZING: "Analyzing the screen…",
+    AppState.RECORDING_VOICE: "Listening… click “Stop and send” when you are done.",
+}
 
 
 class _WarmUp(QRunnable):
@@ -702,6 +874,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--log-level", default=None, choices=("DEBUG", "INFO", "WARNING", "ERROR"))
     parser.add_argument("--no-hotkeys", action="store_true", help="do not install the global keyboard hook")
     parser.add_argument("--backend", choices=tuple(BACKENDS), help="auto, kaggle or local (overrides the saved choice)")
+    parser.add_argument("--tray-only", action="store_true", help="start in the tray without opening the window")
     args = parser.parse_args(argv)
 
     try:
@@ -731,6 +904,7 @@ def main(argv: list[str] | None = None) -> int:
     saved = QSettings()
     saved_backend = str(saved.value("backend", "") or "")
     saved_local = str(saved.value("local_url", "") or "")
+    saved_device = str(saved.value("local_device", "") or "")
     try:
         if args.backend:
             settings = settings.with_backend(args.backend)
@@ -738,6 +912,8 @@ def main(argv: list[str] | None = None) -> int:
             settings = settings.with_backend(saved_backend)
         if saved_local:
             settings = settings.with_local_url(saved_local)
+        if saved_device in LOCAL_DEVICES:
+            settings = settings.with_local_device(saved_device)
     except ValueError as exc:
         logger.warning("ignoring saved settings: %s", exc)
     logger.info("backend: %s (%s)", settings.backend, BACKENDS[settings.backend])
@@ -746,6 +922,8 @@ def main(argv: list[str] | None = None) -> int:
 
     controller = OmniSightController(app, settings, enable_hotkeys=not args.no_hotkeys)
     app.aboutToQuit.connect(controller.shutdown)
+    if not args.tray_only:
+        controller.open_window()
 
     signal.signal(signal.SIGINT, lambda *_: app.quit())
     if hasattr(signal, "SIGBREAK"):  # Ctrl+Break in a Windows console

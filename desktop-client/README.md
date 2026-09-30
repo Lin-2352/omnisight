@@ -9,7 +9,7 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r desktop-client\requirements-windows.txt
 python -m pip install -e .                      # shared omnisight_contracts package
-python desktop-client\main.py                   # optional: --backend auto|kaggle|local --override-url URL --log-level DEBUG
+python desktop-client\main.py                   # optional: --backend auto|kaggle|local --tray-only --override-url URL --log-level DEBUG
 python desktop-client\test_client_pipeline.py   # standalone checks, no GPU needed
 ```
 
@@ -22,6 +22,24 @@ No configuration is needed. By default the client reads the project's public gis
 | `Esc` | Hide the HUD |
 
 Alt+C and Alt+V are consumed system-wide, so the focused app never receives them. Esc is passed through to the focused app as well. The tray icon offers Show HUD, Clear History, Settings (backend, local node URL, override URL, connection test, logs), a Backend submenu and Exit.
+
+## The window (mouse and keyboard)
+
+The window opens at start-up (`--tray-only` starts hidden). Click the tray icon or choose **Open OmniSight** to bring it back; closing it keeps the app in the tray.
+
+| Control | What it does |
+| --- | --- |
+| Ask box + **Send** (Enter) | Captures the screen and asks your typed question about it |
+| **Capture screen** | Explains the screen with no question (same as Alt+C) |
+| **Speak** / **Stop and send** | Click, ask out loud, click again. Anything typed in the ask box is sent with your voice |
+| **Engine** | Auto, Kaggle, or this PC's GPU, CPU or automatic device |
+| **Start / Stop local node** | Starts the model on this PC on the chosen device, and stops it again |
+| **Clear**, **Settings** | Clear the answers shown; open the settings |
+
+- **Answers:** they appear in the window, with Copy Fix and Copy Terminal Command like the HUD. Questions asked with a hotkey still use the HUD, and also appear in the window's history.
+- **Screen capture:** the window is excluded from screen capture (like the HUD), so it never appears in what the model sees. Capture follows the window you were using, not OmniSight's own.
+- **Local node:** the app starts it with `scripts\run-local-gpu.ps1` and shows the device it *actually* runs on. It stops with the app, because Windows kills it if the app exits or crashes. The first start downloads about 2.5 GB.
+- **If the port is taken:** a node already running on the port is reused when it is on the device you chose. A node on the other device, or another program, gives a clear message.
 
 ## Choosing where the model runs (backend)
 
@@ -53,7 +71,10 @@ Alt+C and Alt+V are consumed system-wide, so the focused app never receives them
 
 | Path | Purpose |
 | --- | --- |
-| `main.py` | Single-instance mutex, tray, global keyboard hook, pipeline, shutdown |
+| `main.py` | Single-instance mutex, tray, global keyboard hook, pipeline, window wiring, shutdown |
+| `ui/main_window.py` | The window: ask box, Capture, Speak, engine picker, node button, answer list |
+| `core/node_supervisor.py` | Starts, watches and stops the local node in a kill-on-close Job Object |
+| `core/foreground.py` | Remembers the user's last window so capture ignores OmniSight's own |
 | `core/config.py` | `.env` loading, `ClientSettings`, `EndpointResolver` (30 s cache, ETag, stale/offline detection) |
 | `core/state.py` | `AppState` machine with a transition table and a result history |
 | `core/logger.py` | Colored console and `%APPDATA%\OmniSight\logs\client.log` (5 MB × 3) |

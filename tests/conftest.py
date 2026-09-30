@@ -44,6 +44,8 @@ CLIENT_TEST_FILES = (
     "unit/test_image_pipeline.py",
     "unit/test_audio_recorder.py",
     "unit/test_state_and_config.py",
+    "unit/test_node_supervisor.py",
+    "unit/test_main_window.py",
     "integration/test_dynamic_discovery.py",
     "integration/test_failover_circuit.py",
     "integration/test_full_pipeline_mock.py",
