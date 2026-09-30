@@ -66,13 +66,18 @@ from core.search import SearchOutcome, WebSearch, smart_query  # noqa: E402
 from core.state import AppState, StateMachine  # noqa: E402
 from core.tts import Speaker  # noqa: E402
 from core.watch import (  # noqa: E402
+    CHECK_PROMPT,
     DEFAULT_INTERVAL_S,
-    WATCH_PROMPT,
+    DESCRIBE_PROMPT,
+    DESCRIBE_TOKENS,
+    GENERIC_FINDING,
     FindingTracker,
     WatchScheduler,
     frame_changed,
+    frame_is_flat,
     frame_signature,
     parse_watch_reply,
+    parse_yes_no,
 )
 from network.client import HealthCheckWorker, InferenceClient, InferenceWorker, build_request  # noqa: E402
 from network.schemas import (  # noqa: E402
@@ -500,6 +505,8 @@ class OmniSightController(QObject):
         self._watch_tracker = FindingTracker()
         self._watch_signature: bytes | None = None  # the last frame the model looked at
         self._watch_pending_signature: bytes | None = None
+        self._watch_image: Any = None  # the frame being looked at; dropped when the tick ends
+        self._watch_stage = "check"
         self._watch_worker: InferenceWorker | None = None
         self._watch_notice_pending = False
         self._search_token = 0
@@ -866,6 +873,7 @@ class OmniSightController(QObject):
         self._cancel_watch_request()
         self.watch.stop()
         self._watch_signature = None
+        self._watch_image = None
         self._watch_tracker.reset()
         self.window.set_watch_enabled(False)
         self._update_watch_ui()
@@ -917,9 +925,21 @@ class OmniSightController(QObject):
         if not frame_changed(self._watch_signature, signature):
             self.watch.finish(True)  # the screen is the same: no model call
             return
+        if frame_is_flat(signature):
+            # A plain colour or blank window has nothing to read (the model says YES to those): not sent.
+            self._watch_signature = signature
+            self._watch_tracker.report(None)
+            self.watch.finish(True)
+            return
         self._watch_pending_signature = signature
+        self._watch_image = capture.to_image_payload()
+        self._send_watch_request("check", CHECK_PROMPT, 16)
+
+    def _send_watch_request(self, stage: str, prompt: str, max_new_tokens: int) -> None:
+        """One request to the local node about the frame being looked at (step 1: yes/no, step 2: describe)."""
+        self._watch_stage = stage
         try:
-            request = build_request(capture.to_image_payload(), mode=AnalysisMode.EXPLAIN, prompt=WATCH_PROMPT, max_new_tokens=48)
+            request = build_request(self._watch_image, mode=AnalysisMode.EXPLAIN, prompt=prompt, max_new_tokens=max_new_tokens)
         except ValueError as exc:
             self._on_watch_failed(f"could not build the request: {exc}")
             return
@@ -932,13 +952,30 @@ class OmniSightController(QObject):
         self._watch_worker = worker
         worker.start()
 
+    def _finish_watch_tick(self, ok: bool = True) -> bool:
+        self._watch_image = None  # the frame is dropped as soon as the tick is over
+        return self.watch.finish(ok)
+
     def _on_watch_answer(self, payload: dict[str, Any]) -> None:
         if not self.watch.running:
             return
         result = ClientResult.model_validate(payload)
-        self._watch_signature = self._watch_pending_signature
-        self.watch.finish(True)
-        news = self._watch_tracker.report(parse_watch_reply(result.response.markdown))
+        text = result.response.markdown
+        if self._watch_stage == "check":
+            if self.state.is_busy or self._worker is not None:
+                self._finish_watch_tick()  # the user is using the model: look again later (this frame is not marked seen)
+                return
+            self._watch_signature = self._watch_pending_signature
+            if parse_yes_no(text) is not True:
+                self._watch_tracker.report(None)  # nothing wrong on screen: a later error is news again
+                self._finish_watch_tick()
+            elif self._watch_tracker.active:
+                self._finish_watch_tick()  # the error that was already reported is still showing
+            else:
+                self._send_watch_request("describe", DESCRIBE_PROMPT, DESCRIBE_TOKENS)  # a new error: say what it is
+            return
+        news = self._watch_tracker.report(parse_watch_reply(text) or GENERIC_FINDING)
+        self._finish_watch_tick()
         if news:
             self._notify_finding(news, result)
 
@@ -946,14 +983,14 @@ class OmniSightController(QObject):
         if not self.watch.running:
             return
         logger.info("watch tick failed: %s", message)
-        if self.watch.finish(False):
+        if self._finish_watch_tick(False):
             self._stop_watching("Watching stopped: the local node is not answering. Start it from the window, then turn watching on again.")
 
     def _retire_watch(self, worker: InferenceWorker) -> None:
         if self._watch_worker is worker:
             self._watch_worker = None
             if self.watch.in_flight:  # cancelled in favour of the user: the tick ends without a verdict
-                self.watch.finish(True)
+                self._finish_watch_tick()
         worker.deleteLater()
 
     def _notify_finding(self, finding: str, result: ClientResult) -> None:

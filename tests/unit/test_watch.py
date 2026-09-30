@@ -17,12 +17,18 @@ from core.watch import (
     MIN_GAP_S,
     MIN_INTERVAL_S,
     SIGNATURE_SIZE,
-    WATCH_PROMPT,
+    CHECK_PROMPT,
+    DESCRIBE_PROMPT,
+    DESCRIBE_TOKENS,
+    FLAT_SPREAD,
+    GENERIC_FINDING,
     FindingTracker,
     WatchScheduler,
     frame_changed,
+    frame_is_flat,
     frame_signature,
     parse_watch_reply,
+    parse_yes_no,
 )
 from tests.support import ManualClock, monospace_font, render_terminal
 
@@ -270,8 +276,43 @@ def test_a_very_long_finding_is_cut_on_a_word_boundary() -> None:
     assert finding is not None and len(finding) <= MAX_FINDING_CHARS and finding.endswith("…")
 
 
-def test_the_watch_prompt_asks_for_none_or_one_sentence() -> None:
-    assert "NONE" in WATCH_PROMPT and "one short sentence" in WATCH_PROMPT
+def test_the_prompts_ask_a_yes_no_question_and_then_for_one_sentence() -> None:
+    assert "exactly one word: YES or NO" in CHECK_PROMPT
+    assert "at most 15 words" in DESCRIBE_PROMPT and DESCRIBE_TOKENS == 40
+    assert GENERIC_FINDING.endswith("screen.")
+
+
+@pytest.mark.parametrize(
+    ("reply", "expected"),
+    [("YES", True), ("yes", True), ("Yes.", True), ("  YES, there is a traceback", True), ("NO", False), ("No.", False), ("no error", False),
+     ("", None), ("   ", None), ("maybe", None), ("I cannot tell", None), ("**YES**", True), ("1", None)],
+)
+def test_parse_yes_no_reads_the_first_word_only(reply: str, expected: bool | None) -> None:
+    assert parse_yes_no(reply) is expected
+
+
+def test_a_plain_colour_frame_is_flat_and_anything_with_content_is_not(base: Image.Image) -> None:
+    for colour in ((30, 60, 100), (0, 0, 0), (255, 255, 255), (128, 128, 128)):
+        assert frame_is_flat(sig(Image.new("RGB", (1280, 720), colour)))
+    assert not frame_is_flat(sig(base))
+    page = Image.new("RGB", (1280, 720), (250, 250, 250))
+    for i in range(8):
+        ImageDraw.Draw(page).text((40, 40 + i * 60), "Quarterly planning notes and a bullet list of items", font=monospace_font(24), fill=(20, 20, 20))
+    assert not frame_is_flat(sig(page))
+    assert frame_is_flat(b"")
+    assert FLAT_SPREAD < 40
+
+
+def test_the_tracker_knows_whether_an_error_is_currently_showing() -> None:
+    tracker = FindingTracker()
+    assert not tracker.active
+    tracker.report("Build failed")
+    assert tracker.active
+    tracker.report(None)
+    assert not tracker.active
+    tracker.report("Build failed")
+    tracker.reset()
+    assert not tracker.active
 
 
 # -- reporting each finding once -----------------------------------------------------------------------

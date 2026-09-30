@@ -1,7 +1,11 @@
 """Watch mode: notice an error on the screen without being asked. Pure logic, no Qt.
 
-Every few seconds the controller captures the screen. If (and only if) the picture changed, it asks
-the **local** model one constrained question and this module decides what to do with the answer:
+Every few seconds the controller captures the screen. If (and only if) the picture changed and has
+something to read, it asks the **local** model a constrained YES/NO question. Measured on the local
+2B, a free-form "reply NONE or one sentence" prompt flagged clean screens as errors, while YES/NO found
+every real error and kept clean screens quiet. Only when the answer is YES and no error was already
+showing does a second call ask for a one-sentence description. This module decides what to do with
+the answers:
 
 * ``frame_signature`` / ``frame_changed``: a tiny grayscale fingerprint of the frame, so an unchanged
   screen, a blinking cursor or a ticking clock costs no model call;
@@ -24,11 +28,17 @@ from typing import Final
 
 from PIL import Image
 
-#: The fixed question asked about a changed screen.
-WATCH_PROMPT: Final[str] = (
+#: Step 1: the fixed yes/no question asked about a changed screen.
+CHECK_PROMPT: Final[str] = (
     "Is an error message, exception, crash or failed build visible on this screen? "
-    "Reply NONE if not. Otherwise reply with one short sentence saying what the error is."
+    "Answer with exactly one word: YES or NO."
 )
+#: Step 2 (only after a new YES): what the error is, in a sentence.
+DESCRIBE_PROMPT: Final[str] = "In at most 15 words, say what error message, exception, crash or failed build is shown on this screen."
+#: Generation cap for the description: short, because every token costs time on a slow CPU.
+DESCRIBE_TOKENS: Final[int] = 40
+#: Used when the description comes back empty: the alert is still worth showing.
+GENERIC_FINDING: Final[str] = "An error message appears to be on your screen."
 DEFAULT_INTERVAL_S: Final[float] = 10.0
 MIN_INTERVAL_S: Final[float] = 5.0
 #: Fewest seconds between two ticks, even when the window changes.
@@ -54,6 +64,16 @@ def frame_signature(image_b64: str) -> bytes:
         data = small.tobytes()
         small.close()
     return data
+
+
+#: A screen whose fingerprint varies by no more than this (0-255) has nothing to read: a plain desktop
+#: colour or a blank window. The model answers YES to those, so they are never sent.
+FLAT_SPREAD: Final[int] = 12
+
+
+def frame_is_flat(signature: bytes) -> bool:
+    """True for a uniform picture (nothing on it worth a model call)."""
+    return not signature or max(signature) - min(signature) <= FLAT_SPREAD
 
 
 def frame_changed(previous: bytes | None, current: bytes) -> bool:
@@ -141,6 +161,14 @@ class WatchScheduler:
         return self.failures >= MAX_FAILURES
 
 
+def parse_yes_no(reply: str) -> bool | None:
+    """``True`` for YES, ``False`` for NO, ``None`` when the reply is neither (treated as NO by the caller)."""
+    words = re.findall(r"[a-z]+", (reply or "").lower())
+    if not words:
+        return None
+    return {"yes": True, "no": False}.get(words[0])
+
+
 _NOTHING: Final[re.Pattern[str]] = re.compile(
     r"^(?:none|nothing|n/?a|no\b|there (?:is|are|was|were) no\b|i (?:do not|don't|can't|cannot|could not) |"
     r"cannot |can't |unable |not visible|no error)",
@@ -172,6 +200,11 @@ class FindingTracker:
 
     def __init__(self) -> None:
         self._last: str | None = None
+
+    @property
+    def active(self) -> bool:
+        """An error has been reported and the screen has not been clean since."""
+        return self._last is not None
 
     def report(self, finding: str | None) -> str | None:
         """The finding if it is new since the last report, else ``None``."""
