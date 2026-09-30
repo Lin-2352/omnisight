@@ -72,6 +72,7 @@ class ConversationMemory:
         self.path = path if path is not None else default_path()
         self._enabled = enabled
         self._lock = threading.Lock()
+        self._disk_lock = threading.Lock()  # writes are applied in the order of the latest state
         self._turns: list[ChatTurn] = []
         if enabled:
             self._turns = self._read()
@@ -125,8 +126,7 @@ class ConversationMemory:
             del self._turns[: max(0, len(self._turns) - STORE_TURNS)]
             while self._turns and self._turns[0].role != "user":
                 self._turns.pop(0)
-            snapshot = list(self._turns)
-        self._write(snapshot)
+        self._persist()
 
     def clear(self) -> None:
         with self._lock:
@@ -157,6 +157,16 @@ class ConversationMemory:
         while turns and turns[0].role != "user":
             turns.pop(0)
         return turns
+
+    def _persist(self) -> None:
+        # The snapshot is taken inside the disk lock, so a slow writer can never save an older state
+        # after a newer one, or bring back turns that clear() just removed.
+        with self._disk_lock:
+            with self._lock:
+                turns = list(self._turns)
+                enabled = self._enabled
+            if enabled and turns:
+                self._write(turns)
 
     def _write(self, turns: list[ChatTurn]) -> None:
         payload = {"version": FILE_VERSION, "turns": [{"role": t.role, "text": t.text} for t in turns]}

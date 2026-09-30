@@ -37,6 +37,12 @@ PROBE_FAILURE_TTL_S: Final[float] = 5.0
 #: Probes must never hold up a request for long.
 PROBE_TIMEOUT_S: Final[tuple[float, float]] = (3.0, 5.0)
 WEB_STATUS_PATH: Final[str] = "/api/tunnel-status"
+#: A probe answered with one of these means the tier is down (same set the analyze call fails over on).
+UNREACHABLE_STATUSES: Final[frozenset[int]] = frozenset({502, 503, 504, 507, 521, 522, 523, 524, 530})
+
+
+class TierUnreachable(Exception):
+    """The tier did not answer its probe at all: go to the next one now instead of posting into a dead tier."""
 
 
 def parse_version(value: object) -> tuple[int, int, int] | None:
@@ -95,19 +101,32 @@ class ContractProbe:
         self.ttl_s = ttl_s
         self._clock = clock
         self._lock = threading.Lock()
-        self._cache: dict[str, tuple[float, str | None]] = {}  # url -> (expires_at, version)
+        self._cache: dict[str, tuple[float, str | None, str | None]] = {}  # url -> (expires_at, version, down_reason)
 
     def version(self, session: requests.Session, analyze_url: str, *, web: bool) -> str | None:
+        """The tier's contract version, ``None`` if it answered without one (treated as old).
+
+        Raises ``TierUnreachable`` when the tier did not answer at all.
+        """
         url = probe_url(analyze_url, web=web)
         now = self._clock()
         with self._lock:
             cached = self._cache.get(url)
-            if cached is not None and now < cached[0]:
-                return cached[1]
-        version = self._fetch(session, url, web=web)
+        if cached is not None and now < cached[0]:
+            if cached[2] is not None:
+                raise TierUnreachable(cached[2])
+            return cached[1]
+        version: str | None = None
+        down: str | None = None
+        try:
+            version = self._fetch(session, url, web=web)
+        except TierUnreachable as exc:
+            down = str(exc)
         ttl = self.ttl_s if version is not None else min(self.ttl_s, PROBE_FAILURE_TTL_S)
         with self._lock:
-            self._cache[url] = (self._clock() + ttl, version)
+            self._cache[url] = (self._clock() + ttl, version, down)
+        if down is not None:
+            raise TierUnreachable(down)
         return version
 
     def reset(self) -> None:
@@ -118,12 +137,18 @@ class ContractProbe:
     def _fetch(session: requests.Session, url: str, *, web: bool) -> str | None:
         try:
             response = session.get(url, timeout=PROBE_TIMEOUT_S)
+        except requests.RequestException as exc:
+            logger.info("contract probe %s failed: %s", url, type(exc).__name__)
+            raise TierUnreachable(f"no answer to its version probe ({type(exc).__name__})") from exc
+        if response.status_code in UNREACHABLE_STATUSES:
+            logger.info("contract probe %s -> HTTP %s", url, response.status_code)
+            raise TierUnreachable(f"HTTP {response.status_code} on its version probe")
+        try:
             if response.status_code != 200:
                 logger.info("contract probe %s -> HTTP %s", url, response.status_code)
                 return None
             payload = response.json()
-        except (requests.RequestException, ValueError) as exc:
-            logger.info("contract probe %s failed: %s", url, type(exc).__name__)
+        except ValueError:
             return None
         value = payload.get("contractVersion" if web else "contract_version") if isinstance(payload, dict) else None
         return value if parse_version(value) is not None else None

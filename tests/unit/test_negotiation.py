@@ -20,6 +20,7 @@ from network.negotiation import (
     probe_url,
     request_body,
     supports_history,
+    TierUnreachable,
 )
 from network.schemas import AnalysisMode, ChatTurn, ImagePayload
 from tests.support import (
@@ -125,15 +126,14 @@ def test_probe_reads_node_and_web_versions_and_caches_them(http_mock: Any, clock
 @pytest.mark.parametrize(
     "respond",
     [
-        lambda mock: mock.get(NODE_HEALTH, status=503, json={}),
+        lambda mock: mock.get(NODE_HEALTH, status=404, json={}),
         lambda mock: mock.get(NODE_HEALTH, body="not json"),
         lambda mock: mock.get(NODE_HEALTH, json=["a", "list"]),
         lambda mock: mock.get(NODE_HEALTH, json={"status": "ok"}),
         lambda mock: mock.get(NODE_HEALTH, json={"contract_version": "banana"}),
-        lambda mock: mock.get(NODE_HEALTH, body=requests.ConnectionError("down")),
     ],
 )
-def test_an_unprobeable_tier_reports_no_version_and_is_retried_soon(respond: Any, http_mock: Any, clock: ManualClock) -> None:
+def test_an_unversioned_tier_reports_no_version_and_is_retried_soon(respond: Any, http_mock: Any, clock: ManualClock) -> None:
     respond(http_mock)
     probe = ContractProbe(ttl_s=60.0, clock=clock)
     session = requests.Session()
@@ -142,6 +142,31 @@ def test_an_unprobeable_tier_reports_no_version_and_is_retried_soon(respond: Any
     assert len(http_mock.calls) == 1  # briefly cached
     clock.advance(6.0)  # a booting node gets another look well before the normal 60 s
     probe.version(session, KAGGLE_ANALYZE, web=False)
+    assert len(http_mock.calls) == 2
+
+
+@pytest.mark.parametrize(
+    "respond",
+    [
+        lambda mock: mock.get(NODE_HEALTH, body=requests.ConnectionError("down")),
+        lambda mock: mock.get(NODE_HEALTH, body=requests.ConnectTimeout("slow")),
+        lambda mock: mock.get(NODE_HEALTH, status=502, json={}),
+        lambda mock: mock.get(NODE_HEALTH, status=530, json={}),
+    ],
+)
+def test_a_tier_that_does_not_answer_its_probe_is_unreachable_and_remembered_briefly(
+    respond: Any, http_mock: Any, clock: ManualClock
+) -> None:
+    respond(http_mock)
+    probe = ContractProbe(ttl_s=60.0, clock=clock)
+    session = requests.Session()
+    for _ in range(2):
+        with pytest.raises(TierUnreachable):
+            probe.version(session, KAGGLE_ANALYZE, web=False)
+    assert len(http_mock.calls) == 1  # the second raise came from the cache
+    clock.advance(6.0)
+    with pytest.raises(TierUnreachable):
+        probe.version(session, KAGGLE_ANALYZE, web=False)
     assert len(http_mock.calls) == 2
 
 
@@ -216,3 +241,31 @@ def test_chat_with_no_capable_tier_explains_what_to_do(http_mock: Any, clock: Ma
     with pytest.raises(InferenceError, match="Chat needs a node that speaks contract 2.2.0"):
         make_client(clock).analyze(chat_request())
     assert not any(call.request.method == "POST" for call in http_mock.calls)
+
+
+def test_a_dead_tier_with_history_fails_over_at_once_and_opens_the_breaker(http_mock: Any, clock: ManualClock) -> None:
+    """The probe must not add a second timeout in front of a tier that is already down."""
+    import time
+
+    http_mock.get(GIST_URL, json=gist_body(endpoint_record()))
+    http_mock.get(NODE_HEALTH, body=requests.ConnectTimeout("no connection"))
+    http_mock.get(WEB_STATUS, json={"contractVersion": "2.2.0"})
+    sent: list[dict[str, Any]] = []
+    serve_answer(http_mock, FALLBACK_URL, sent)
+    client = make_client(clock)
+    started = time.perf_counter()
+    result = client.analyze(screen_request(HISTORY))
+    assert time.perf_counter() - started < 0.2  # the same failover budget as a plain request
+    assert result.metrics.tier == "fallback" and len(sent[0]["history"]) == 2
+    assert not any(call.request.method == "POST" and call.request.url == KAGGLE_ANALYZE for call in http_mock.calls)
+    probes = sum(call.request.url == NODE_HEALTH for call in http_mock.calls)
+    client.analyze(screen_request(HISTORY))  # breaker open: the dead tier is not even probed again
+    assert sum(call.request.url == NODE_HEALTH for call in http_mock.calls) == probes
+
+
+def test_chat_with_every_tier_down_reports_the_failures(http_mock: Any, clock: ManualClock) -> None:
+    http_mock.get(GIST_URL, json=gist_body(endpoint_record()))
+    http_mock.get(NODE_HEALTH, status=530, json={})
+    http_mock.get(WEB_STATUS, body=requests.ConnectionError("offline"))
+    with pytest.raises(InferenceError, match="every inference endpoint failed"):
+        make_client(clock).analyze(chat_request(HISTORY))

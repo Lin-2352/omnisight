@@ -41,7 +41,7 @@ from pydantic import ValidationError
 
 from core.config import ANALYZE_PATH, HEALTH_PATH, ClientSettings, EndpointResolver
 from core.logger import get_logger
-from network.negotiation import DEFAULT_PROBE, ContractProbe, needs_probe, request_body
+from network.negotiation import DEFAULT_PROBE, ContractProbe, TierUnreachable, needs_probe, request_body
 from network.schemas import (
     CONTRACT_VERSION,
     AnalysisMode,
@@ -301,7 +301,15 @@ class InferenceClient:
                 failures.append(f"{target.tier}: skipped (failed within the last {self.breaker.cooldown_s:.0f} s)")
                 logger.info("%s tier skipped: circuit open for %s", target.tier, target.url)
                 continue
-            body = self._body_for(target, request)
+            try:
+                body = self._body_for(target, request)
+            except TierUnreachable as exc:
+                self.breaker.record_failure(target.url)
+                failures.append(f"{target.tier}: {exc}")
+                logger.warning("%s tier failed its probe: %s", target.tier, exc)
+                if target.tier == "kaggle":
+                    self.resolver.invalidate()
+                continue
             if body is None:
                 failures.append(f"{target.tier}: too old for chat (contract below 2.2.0)")
                 logger.info("%s tier skipped: it cannot take %s requests", target.tier, request.mode.value)

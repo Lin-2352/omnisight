@@ -83,9 +83,18 @@ function serveHealthyNode(contractVersion = "2.2.0"): void {
   route((url) => url === `${NODE}/v1/health`, () => json({ status: "ok", model_loaded: true, contract_version: contractVersion }));
   route(
     (url) => url === `${NODE}/v1/analyze`,
-    (_url, init) => json(nodeAnswer(JSON.parse(String(init?.body)).request_id)),
+    (_url, init) => {
+      const payload = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      // A 2.1.0 node is strict (extra="forbid"): any key it does not know, even history: [], is a 422.
+      if (contractVersion === "2.1.0" && Object.keys(payload).some((key) => !OLD_NODE_KEYS.has(key))) {
+        return json({ error_code: "invalid_payload", message: "extra fields are not permitted", details: ["history: Extra inputs are not permitted"] }, 422);
+      }
+      return json(nodeAnswer(payload.request_id as string));
+    },
   );
 }
+
+const OLD_NODE_KEYS = new Set(["request_id", "mode", "image", "audio", "prompt", "max_new_tokens", "temperature", "client"]);
 
 function geminiAnswer(text = "Gemini says: the loop index runs one past the end.\n\n```python\nfor s in scores:\n    print(s)\n```"): Response {
   return json({ candidates: [{ content: { parts: [{ text }] }, finishReason: "STOP" }], usageMetadata: { candidatesTokenCount: 42 } });
@@ -445,7 +454,26 @@ describe("conversation memory and chat (contract 2.2.0)", () => {
     serveHealthyNode("2.1.0");
     const r = await post(body({ history }));
     expect(r.tier).toBe("kaggle");
-    expect(analyzeBody().history).toEqual([]);
+    expect(analyzeBody()).not.toHaveProperty("history");
+  });
+
+  it("never sends the history key to a 2.1.0 node, even when there is no history", async () => {
+    serveGist(gistRecord());
+    serveHealthyNode("2.1.0");
+    const r = await post(body());
+    expect(r.status).toBe(200);
+    expect(r.tier).toBe("kaggle");
+    expect(analyzeBody()).not.toHaveProperty("history");
+  });
+
+  it("accepts an explicit null image for chat, as the desktop client sends it", async () => {
+    serveGist(gistRecord("offline"));
+    route((url) => url.includes(":generateContent"), () => geminiAnswer("ok"));
+    const r = await post({ ...chatBody(), image: null, history: [] });
+    expect(r.status).toBe(200);
+    expect(r.tier).toBe("gemini");
+    const explain = await post({ ...body(), image: null });
+    expect(explain.status).toBe(422);
   });
 
   it("skips an old node for a chat turn instead of sending it an unknown mode", async () => {

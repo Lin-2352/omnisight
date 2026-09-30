@@ -39,7 +39,10 @@ function answer(response: AnalyzeResponse, tier: Tier, trace: string[]): NextRes
 export function requestForNode(request: AnalyzeRequest, nodeContract: string | undefined): AnalyzeRequest | null {
   if (versionAtLeast(nodeContract, "2.2.0")) return request;
   if (request.mode === "chat" || !request.image) return null;
-  return request.history?.length ? { ...request, history: [] } : request;
+  // A 2.1.0 node forbids unknown fields, so the key must be absent, not merely empty.
+  const withoutHistory = { ...request };
+  delete withoutHistory.history;
+  return withoutHistory;
 }
 
 export async function POST(request: Request): Promise<NextResponse> {

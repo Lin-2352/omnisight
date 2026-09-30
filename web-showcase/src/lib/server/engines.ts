@@ -1,7 +1,7 @@
 // The three answer engines behind /api/fallback-infer. Node runtime only.
 import { createHash } from "node:crypto";
 
-import type { AnalyzeRequest, AnalyzeResponse } from "../contracts";
+import { CONTRACT_VERSION, type AnalyzeRequest, type AnalyzeResponse } from "../contracts";
 import { deriveSummary, extractCodeBlocks } from "../markdown";
 import { presetBySha256 } from "../presets";
 import { systemPromptFor, userText } from "./prompts";
@@ -45,7 +45,7 @@ function buildResponse(
   const summary = deriveSummary(markdown) || (blocks.length ? `The answer consists of ${blocks.length} code block(s).` : "No answer was produced.");
   return {
     request_id: request.request_id ?? crypto.randomUUID(),
-    contract_version: "2.1.0",
+    contract_version: CONTRACT_VERSION,
     model_id: modelId,
     source,
     summary,
