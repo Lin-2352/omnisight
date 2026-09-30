@@ -94,6 +94,7 @@ from PyQt6.QtCore import (  # noqa: E402
     QSettings,
     QThread,
     QThreadPool,
+    Qt,
     QTimer,
     QUrl,
     pyqtSignal,
@@ -507,6 +508,8 @@ class OmniSightController(QObject):
         self._actions_enabled = bool(saved.value("actions_enabled", False, type=bool))
         self._actions_cwd = Path(str(saved.value("actions_cwd", str(Path.home()))))
         self._action_dialog_open = False  # while it is open (and its output on screen) watch must not look at the screen
+        self._run_dialog: RunDialog | None = None
+        self._allow_box: QMessageBox | None = None
         self._search_enabled = bool(saved.value("web_search", False, type=bool))
         self._smart_enabled = bool(saved.value("smart_query", False, type=bool)) and self._search_enabled
         self.watch = WatchScheduler(_watch_interval())
@@ -837,39 +840,70 @@ class OmniSightController(QObject):
     # -- watch mode (local engine only) -----------------------------------------------------------------
 
     def set_actions_enabled(self, on: bool) -> None:
-        """The master switch for Run... buttons. Turning it on asks once, in plain words; it is remembered either way."""
+        """The master switch for Run... buttons. Turning it on asks once, in plain words; it is remembered either way.
+
+        The question is a window-modal box that is *opened*, not run in a nested loop: a call from assistive technology
+        (UI Automation Toggle/Invoke) returns at once instead of hanging until the box is answered.
+        """
         if on and not self._actions_enabled:
-            answer = QMessageBox.question(
-                self.window,
-                "Allow running commands?",
-                "OmniSight will show a Run... button on answers that contain a terminal command. Clicking it opens a dialog with "
-                "the exact command; nothing runs until you type RUN, and never by itself.\n\n"
-                "The command is written by an AI model that reads your screen, and text on a screen or web page can influence it. "
-                "A few catastrophic commands are always refused, but this is not a sandbox: read every command.\n\n"
-                "Turn it on?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if answer != QMessageBox.StandardButton.Yes:
-                self.window.set_actions_enabled(False)
-                return
+            if self._allow_box is None:  # a second click while the question is showing changes nothing
+                self._ask_allow_actions(self._apply_actions_enabled)
+            return
+        self._apply_actions_enabled(on)
+
+    def _apply_actions_enabled(self, on: bool) -> None:
         self._actions_enabled = on
         QSettings().setValue("actions_enabled", on)
-        self.window.set_actions_enabled(on)
+        self.window.set_actions_enabled(on)  # also unchecks the box when the question was declined
         logger.info("running commands %s", "allowed (each needs an approval)" if on else "off")
 
+    def _build_allow_box(self) -> QMessageBox:
+        box = QMessageBox(
+            QMessageBox.Icon.Question,
+            ALLOW_ACTIONS_TITLE,
+            ALLOW_ACTIONS_TEXT,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            self.window,
+        )
+        box.setDefaultButton(QMessageBox.StandardButton.No)
+        box.setEscapeButton(QMessageBox.StandardButton.No)
+        box.setWindowModality(Qt.WindowModality.WindowModal)
+        return box
+
+    def _ask_allow_actions(self, on_answer: Callable[[bool], None]) -> None:
+        box = self._build_allow_box()
+        self._allow_box = box
+
+        def finished(_result: int) -> None:
+            button = box.clickedButton()
+            yes = button is not None and box.standardButton(button) == QMessageBox.StandardButton.Yes
+            self._allow_box = None
+            box.deleteLater()
+            on_answer(yes)
+
+        box.finished.connect(finished)
+        box.open()
+
     def on_run_requested(self, language: str, command: str) -> None:
-        """A card's Run... button: show the approval dialog (only when the switch is on and it is a terminal command)."""
-        if not self._actions_enabled or not is_shell_language(language) or not command.strip():
+        """A card's Run... button: show the approval dialog (only when the switch is on and it is a terminal command).
+
+        Like the question above, the dialog is window-modal but opened without a nested event loop.
+        """
+        if not self._actions_enabled or not is_shell_language(language) or not command.strip() or self._run_dialog is not None:
             return
         dialog = RunDialog(command, language, self.actions, self._actions_cwd, parent=self.window)
+        self._run_dialog = dialog
         self._action_dialog_open = True
-        try:
-            dialog.exec()
-        finally:
-            self._action_dialog_open = False
-        self._actions_cwd = dialog.cwd
-        QSettings().setValue("actions_cwd", str(self._actions_cwd))
+        dialog.finished.connect(self._on_run_dialog_closed)
+        dialog.open()
+
+    def _on_run_dialog_closed(self, _result: int) -> None:
+        dialog, self._run_dialog = self._run_dialog, None
+        self._action_dialog_open = False
+        if dialog is not None:
+            self._actions_cwd = dialog.cwd
+            QSettings().setValue("actions_cwd", str(self._actions_cwd))
+            dialog.deleteLater()
 
     def set_watch_enabled(self, on: bool) -> None:
         """Start or stop watching the screen. Always off at start-up; only ever on a local engine."""
@@ -1356,6 +1390,15 @@ WATCH_NOT_LOOPBACK: Final[str] = (
     "elsewhere, so your screen would leave this PC: watching is off."
 )
 
+
+ALLOW_ACTIONS_TITLE: Final[str] = "Allow running commands?"
+ALLOW_ACTIONS_TEXT: Final[str] = (
+    "OmniSight will show a Run... button on answers that contain a terminal command. Clicking it opens a dialog with "
+    "the exact command; nothing runs until you type RUN, and never by itself.\n\n"
+    "The command is written by an AI model that reads your screen, and text on a screen or web page can influence it. "
+    "A few catastrophic commands are always refused, but this is not a sandbox: read every command.\n\n"
+    "Turn it on?"
+)
 
 WATCH_ON_CPU: Final[str] = (
     "Watching on the CPU engine works but is slow: each check takes several seconds of CPU time and a question you ask "

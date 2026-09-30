@@ -1360,35 +1360,62 @@ def answer_with(*blocks: tuple[str, str]) -> ClientResult:
     return ClientResult(response=AnalyzeResponse.model_validate(body), metrics=LatencyMetrics(tier="local"))
 
 
+class FakeSignal:
+    def __init__(self) -> None:
+        self._slots: list[Any] = []
+
+    def connect(self, slot: Any) -> None:
+        self._slots.append(slot)
+
+    def emit(self, code: int = 0) -> None:
+        for slot in list(self._slots):
+            slot(code)
+
+
 class FakeDialog:
-    """Stands in for RunDialog: records what it was asked to show, never runs anything."""
+    """Stands in for RunDialog: records what it was asked to show, never runs anything, is opened (not exec'd)."""
 
     opened: list[tuple[str, str, Path]] = []
+    last: Any = None
 
     def __init__(self, command: str, language: str, runner: Any, cwd: Path, parent: Any = None) -> None:
-        self.cwd = cwd / "chosen"
+        self.cwd = cwd
         self.command, self.language = command, language
+        self.finished = FakeSignal()
+        self.deleted = False
         FakeDialog.opened.append((command, language, cwd))
+        FakeDialog.last = self
 
-    def exec(self) -> int:
-        return 0
+    def open(self) -> None:
+        pass
+
+    def finish(self, cwd: Path | None = None) -> None:
+        if cwd is not None:
+            self.cwd = cwd
+        self.finished.emit(0)
+
+    def deleteLater(self) -> None:
+        self.deleted = True
 
 
 @pytest.fixture
 def acting(qapp: Any, make_controller: Any, monkeypatch: pytest.MonkeyPatch):
+    """A controller whose "Allow running commands?" question is answered at once (``controller._answer``) and whose Run
+    dialog is a fake. The real question box and dialog are tested separately."""
+
     def build(**kw: Any) -> tuple[Any, list[Any]]:
         controller, _ = make_controller(**kw)
-        FakeDialog.opened = []
+        FakeDialog.opened, FakeDialog.last = [], None
         asked: list[Any] = []
+        controller._answer = True
 
-        def question(parent: Any, title: str, text: str, buttons: Any, default: Any) -> Any:
-            asked.append((title, text, buttons, default))
-            return question.answer  # type: ignore[attr-defined]
+        def ask(on_answer: Any) -> None:
+            asked.append(on_answer)
+            if controller._answer is not None:
+                on_answer(controller._answer)
 
-        question.answer = main.QMessageBox.StandardButton.Yes  # type: ignore[attr-defined]
-        monkeypatch.setattr(main.QMessageBox, "question", staticmethod(question))
+        controller._ask_allow_actions = ask
         monkeypatch.setattr(main, "RunDialog", FakeDialog)
-        controller._question = question
         return controller, asked
 
     return build
@@ -1407,21 +1434,30 @@ def test_running_commands_is_off_by_default_and_no_run_button_is_visible(qapp: A
     assert FakeDialog.opened == []  # the switch is off: nothing opens even if asked
 
 
-def test_turning_the_switch_on_asks_in_plain_words_with_no_as_the_default(qapp: Any, acting: Any) -> None:
+def test_turning_the_switch_on_asks_and_a_yes_turns_it_on_and_remembers_it(qapp: Any, acting: Any) -> None:
     controller, asked = acting()
     controller.window.actions_check.setChecked(True)
-    assert controller._actions_enabled and MemorySettings.store["actions_enabled"] is True
-    (title, text, buttons, default), = asked
-    assert title == "Allow running commands?" and default == main.QMessageBox.StandardButton.No
-    assert "type RUN" in text and "not a sandbox" in text and "influence" in text and "never by itself" in text
+    assert len(asked) == 1 and controller._actions_enabled and MemorySettings.store["actions_enabled"] is True
 
 
-def test_declining_the_question_leaves_it_off(qapp: Any, acting: Any) -> None:
+def test_the_question_box_is_plain_spoken_defaults_to_no_and_is_window_modal_without_a_nested_loop(qapp: Any, acting: Any) -> None:
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtWidgets import QMessageBox
+
+    controller, _ = acting()
+    box = controller._build_allow_box()
+    assert box.windowTitle() == "Allow running commands?" and box.windowModality() == Qt.WindowModality.WindowModal
+    assert box.defaultButton() is box.button(QMessageBox.StandardButton.No) and box.escapeButton() is box.button(QMessageBox.StandardButton.No)
+    assert "type RUN" in box.text() and "not a sandbox" in box.text() and "influence" in box.text() and "never by itself" in box.text()
+    box.deleteLater()
+
+
+def test_declining_the_question_leaves_it_off_and_unchecks_the_box(qapp: Any, acting: Any) -> None:
     controller, asked = acting()
-    controller._question.answer = main.QMessageBox.StandardButton.No
+    controller._answer = False
     controller.window.actions_check.setChecked(True)
     assert not controller._actions_enabled and not controller.window.actions_check.isChecked()
-    assert MemorySettings.store.get("actions_enabled") is None
+    assert MemorySettings.store["actions_enabled"] is False and len(asked) == 1
 
 
 def test_turning_it_off_needs_no_question_and_hides_the_buttons_again(qapp: Any, acting: Any) -> None:
@@ -1462,10 +1498,35 @@ def test_clicking_run_opens_the_dialog_with_the_exact_command_and_remembers_the_
     controller.window.add_exchange("q", answer_with(("powershell", "git status\ngit diff --stat")))
     run_buttons(controller)[0].click()
     ((command, language, cwd),) = FakeDialog.opened
-    assert (command, language) == ("git status\ngit diff --stat", "powershell") and cwd == controller._actions_cwd.parent
-    assert controller._actions_cwd.name == "chosen" and MemorySettings.store["actions_cwd"].endswith("chosen")
+    assert (command, language) == ("git status\ngit diff --stat", "powershell") and cwd == controller._actions_cwd
+    assert controller._action_dialog_open is True and controller._run_dialog is FakeDialog.last
+    chosen = cwd / "chosen"
+    FakeDialog.last.finish(chosen)  # the user closes it
+    assert controller._action_dialog_open is False and controller._run_dialog is None and FakeDialog.last.deleted
+    assert controller._actions_cwd == chosen and MemorySettings.store["actions_cwd"] == str(chosen)
     run_buttons(controller)[0].click()
-    assert FakeDialog.opened[1][2].name == "chosen"  # the next dialog starts in the remembered folder
+    assert FakeDialog.opened[1][2] == chosen  # the next dialog starts in the remembered folder
+
+
+def test_a_second_run_click_while_a_dialog_is_open_changes_nothing(qapp: Any, acting: Any) -> None:
+    controller, _ = acting()
+    controller.window.actions_check.setChecked(True)
+    controller.window.add_exchange("q", answer_with(("powershell", "git status")))
+    run_buttons(controller)[0].click()
+    run_buttons(controller)[0].click()
+    controller.on_run_requested("bash", "ls")
+    assert len(FakeDialog.opened) == 1
+    FakeDialog.last.finish()
+    controller.on_run_requested("bash", "ls")
+    assert len(FakeDialog.opened) == 2  # once the first is closed, the next can open
+
+
+def test_a_second_toggle_while_the_question_is_showing_asks_nothing_more(qapp: Any, acting: Any) -> None:
+    controller, asked = acting()
+    controller._answer = None  # the question stays open
+    controller._allow_box = object()  # as if the real box were showing
+    controller.window.actions_check.setChecked(True)
+    assert asked == [] and not controller._actions_enabled
 
 
 @pytest.mark.parametrize(("language", "command"), [("python", "print(1)"), ("json", "{}"), ("", "ls"), ("bash", ""), ("bash", "   \n ")])
@@ -1519,24 +1580,18 @@ def test_watch_does_not_look_at_the_screen_while_the_run_dialog_is_open(qapp: An
     FakeWorker.script = ["NO"]
     controller.window.watch_check.setChecked(True)
     controller._actions_enabled = True
-    grabs_during: list[int] = []
-
-    class InspectingDialog(FakeDialog):
-        def exec(self) -> int:
-            assert controller._action_dialog_open is True
-            before = fake.grabs
-            clock.advance(60.0)
-            controller._watch_tick()  # a tick arrives while the dialog is open
-            qapp.processEvents()
-            grabs_during.append(fake.grabs - before)
-            return 0
-
-    monkeypatch.setattr(main, "RunDialog", InspectingDialog)
-    controller.on_run_requested("powershell", "git status")
-    assert grabs_during == [0] and controller._action_dialog_open is False
+    monkeypatch.setattr(main, "RunDialog", FakeDialog)
+    controller.on_run_requested("powershell", "git status")  # the dialog is open now (opened, not blocking)
+    assert controller._action_dialog_open is True
+    before = fake.grabs
+    clock.advance(60.0)
+    controller._watch_tick()
+    qapp.processEvents()
+    assert fake.grabs == before  # nothing was captured while the dialog is open
+    FakeDialog.last.finish()
     clock.advance(11.0)
-    controller._watch_tick()  # and it resumes afterwards
-    assert wait_until(lambda: fake.grabs > 0, TIMEOUT_S, pump(qapp))
+    controller._watch_tick()  # and watching resumes afterwards
+    assert wait_until(lambda: fake.grabs > before, TIMEOUT_S, pump(qapp))
 
 
 def test_a_frame_taken_just_before_the_dialog_opened_is_dropped(qapp: Any, watching: Any) -> None:
@@ -1547,3 +1602,33 @@ def test_a_frame_taken_just_before_the_dialog_opened_is_dropped(qapp: Any, watch
     controller._on_watch_captured(object(), None)  # type: ignore[arg-type]
     assert not controller.watch.in_flight and not FakeWorker.instances
     controller._action_dialog_open = False
+
+
+def test_the_real_question_box_answers_yes_no_and_escape_correctly(qapp: Any, acting: Any) -> None:
+    """No stub here: the actual non-blocking QMessageBox, answered the way a user (or UI Automation) would."""
+    from PyQt6.QtWidgets import QMessageBox
+
+    controller, _ = acting()
+    controller.__dict__.pop("_ask_allow_actions")  # back to the real method
+    answers: list[bool] = []
+    controller._ask_allow_actions(answers.append)
+    assert controller._allow_box is not None  # opened, and the call returned at once
+    controller._allow_box.button(QMessageBox.StandardButton.Yes).click()
+    assert answers == [True] and controller._allow_box is None
+    controller._ask_allow_actions(answers.append)
+    controller._allow_box.button(QMessageBox.StandardButton.No).click()
+    controller._ask_allow_actions(answers.append)
+    controller._allow_box.reject()  # Esc or the window's close button
+    assert answers == [True, False, False] and controller._allow_box is None
+
+
+def test_the_real_switch_flow_turns_on_only_after_yes(qapp: Any, acting: Any) -> None:
+    from PyQt6.QtWidgets import QMessageBox
+
+    controller, _ = acting()
+    controller.__dict__.pop("_ask_allow_actions")
+    controller.window.actions_check.setChecked(True)  # returns at once; the question is showing
+    assert controller._allow_box is not None and not controller._actions_enabled
+    controller.window.actions_check.setChecked(True)  # already checked: nothing more to ask
+    controller._allow_box.button(QMessageBox.StandardButton.Yes).click()
+    assert controller._actions_enabled and controller.window.actions_check.isChecked() and MemorySettings.store["actions_enabled"] is True
