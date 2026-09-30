@@ -20,6 +20,7 @@ import main
 from capture import screen
 from capture.audio import RecordingResult
 from core.foreground import WindowInfo
+from core.actions import ActionRunner, AuditLog
 from core.memory import ConversationMemory
 from core.search import SearchOutcome
 from core.node_supervisor import NodeState, NodeStatus
@@ -204,6 +205,7 @@ def make_controller(qapp: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         monkeypatch.setattr(main, "NodeSupervisor", FakeNode)
         monkeypatch.setattr(main, "Speaker", FakeSpeaker)
         monkeypatch.setattr(main, "WebSearch", FakeSearch)
+        monkeypatch.setattr(main, "ActionRunner", lambda: ActionRunner(audit=AuditLog(tmp_path / "actions.log")))
         monkeypatch.setattr(
             main, "ConversationMemory", lambda enabled=True: ConversationMemory(tmp_path / "history.json", enabled=enabled)
         )
@@ -1344,3 +1346,168 @@ def test_an_answer_with_no_problem_has_no_note(qapp: Any, make_controller: Any) 
     controller.window.search_check.setChecked(True)
     ask(controller, qapp, "why?", 1)
     assert not any("unavailable" in t or "could not use" in t for t in labels(controller.window._exchanges[0]))
+
+
+# ---------------------------------------------------------------------------
+# Running commands (Phase 5)
+# ---------------------------------------------------------------------------
+
+
+def answer_with(*blocks: tuple[str, str]) -> ClientResult:
+    """An answer whose code blocks are exactly ``blocks`` (language, code)."""
+    body = analyze_response_json()
+    body["code_blocks"] = [{"language": language, "code": code} for language, code in blocks]
+    return ClientResult(response=AnalyzeResponse.model_validate(body), metrics=LatencyMetrics(tier="local"))
+
+
+class FakeDialog:
+    """Stands in for RunDialog: records what it was asked to show, never runs anything."""
+
+    opened: list[tuple[str, str, Path]] = []
+
+    def __init__(self, command: str, language: str, runner: Any, cwd: Path, parent: Any = None) -> None:
+        self.cwd = cwd / "chosen"
+        self.command, self.language = command, language
+        FakeDialog.opened.append((command, language, cwd))
+
+    def exec(self) -> int:
+        return 0
+
+
+@pytest.fixture
+def acting(qapp: Any, make_controller: Any, monkeypatch: pytest.MonkeyPatch):
+    def build(**kw: Any) -> tuple[Any, list[Any]]:
+        controller, _ = make_controller(**kw)
+        FakeDialog.opened = []
+        asked: list[Any] = []
+
+        def question(parent: Any, title: str, text: str, buttons: Any, default: Any) -> Any:
+            asked.append((title, text, buttons, default))
+            return question.answer  # type: ignore[attr-defined]
+
+        question.answer = main.QMessageBox.StandardButton.Yes  # type: ignore[attr-defined]
+        monkeypatch.setattr(main.QMessageBox, "question", staticmethod(question))
+        monkeypatch.setattr(main, "RunDialog", FakeDialog)
+        controller._question = question
+        return controller, asked
+
+    return build
+
+
+def run_buttons(controller: Any) -> list[Any]:
+    return [b for card in controller.window._exchanges for b in card.run_buttons]
+
+
+def test_running_commands_is_off_by_default_and_no_run_button_is_visible(qapp: Any, acting: Any) -> None:
+    controller, _ = acting()
+    assert not controller._actions_enabled and not controller.window.actions_check.isChecked()
+    controller.window.add_exchange("q", answer_with(("powershell", "git status")))
+    assert len(run_buttons(controller)) == 1 and not run_buttons(controller)[0].isVisibleTo(controller.window)
+    controller.on_run_requested("powershell", "git status")
+    assert FakeDialog.opened == []  # the switch is off: nothing opens even if asked
+
+
+def test_turning_the_switch_on_asks_in_plain_words_with_no_as_the_default(qapp: Any, acting: Any) -> None:
+    controller, asked = acting()
+    controller.window.actions_check.setChecked(True)
+    assert controller._actions_enabled and MemorySettings.store["actions_enabled"] is True
+    (title, text, buttons, default), = asked
+    assert title == "Allow running commands?" and default == main.QMessageBox.StandardButton.No
+    assert "type RUN" in text and "not a sandbox" in text and "influence" in text and "never by itself" in text
+
+
+def test_declining_the_question_leaves_it_off(qapp: Any, acting: Any) -> None:
+    controller, asked = acting()
+    controller._question.answer = main.QMessageBox.StandardButton.No
+    controller.window.actions_check.setChecked(True)
+    assert not controller._actions_enabled and not controller.window.actions_check.isChecked()
+    assert MemorySettings.store.get("actions_enabled") is None
+
+
+def test_turning_it_off_needs_no_question_and_hides_the_buttons_again(qapp: Any, acting: Any) -> None:
+    controller, asked = acting()
+    controller.window.actions_check.setChecked(True)
+    controller.window.add_exchange("q", answer_with(("bash", "ls")))
+    assert run_buttons(controller)[0].isVisibleTo(controller.window)
+    controller.window.actions_check.setChecked(False)
+    assert len(asked) == 1 and MemorySettings.store["actions_enabled"] is False
+    assert not run_buttons(controller)[0].isVisibleTo(controller.window)
+
+
+def test_each_shell_block_gets_its_own_run_button_and_other_languages_get_none(qapp: Any, acting: Any) -> None:
+    controller, _ = acting()
+    controller.window.actions_check.setChecked(True)
+    controller.window.add_exchange("one", answer_with(("python", "print(1)"), ("powershell", "git status")))
+    controller.window.add_exchange("two", answer_with(("bash", "ls"), ("cmd", "dir"), ("python", "x = 1")))
+    controller.window.add_exchange("three", answer_with(("python", "print(1)"), ("json", "{}")))
+    first, second, third = (card.run_buttons for card in controller.window._exchanges)
+    assert [b.text() for b in first] == ["Run..."] and [b.text() for b in second] == ["Run 1...", "Run 2..."] and third == []
+    assert [b.accessibleName() for b in second] == ["Run command 1", "Run command 2"]
+    assert all(b.isVisibleTo(controller.window) for b in first + second)
+
+
+def test_switching_on_reveals_the_buttons_of_earlier_answers_and_later_ones_show_theirs(qapp: Any, acting: Any) -> None:
+    controller, _ = acting()
+    controller.window.add_exchange("off", answer_with(("bash", "ls")))
+    controller.window.actions_check.setChecked(True)
+    controller.window.add_exchange("on", answer_with(("bash", "ls")))
+    earlier, later = controller.window._exchanges
+    assert later.run_buttons[0].isVisibleTo(controller.window)
+    assert earlier.run_buttons[0].isVisibleTo(controller.window)  # the card made while the switch was off gets its button too
+
+
+def test_clicking_run_opens_the_dialog_with_the_exact_command_and_remembers_the_folder(qapp: Any, acting: Any) -> None:
+    controller, _ = acting()
+    controller.window.actions_check.setChecked(True)
+    controller.window.add_exchange("q", answer_with(("powershell", "git status\ngit diff --stat")))
+    run_buttons(controller)[0].click()
+    ((command, language, cwd),) = FakeDialog.opened
+    assert (command, language) == ("git status\ngit diff --stat", "powershell") and cwd == controller._actions_cwd.parent
+    assert controller._actions_cwd.name == "chosen" and MemorySettings.store["actions_cwd"].endswith("chosen")
+    run_buttons(controller)[0].click()
+    assert FakeDialog.opened[1][2].name == "chosen"  # the next dialog starts in the remembered folder
+
+
+@pytest.mark.parametrize(("language", "command"), [("python", "print(1)"), ("json", "{}"), ("", "ls"), ("bash", ""), ("bash", "   \n ")])
+def test_only_non_empty_terminal_commands_open_the_dialog(qapp: Any, acting: Any, language: str, command: str) -> None:
+    controller, _ = acting()
+    controller.window.actions_check.setChecked(True)
+    controller.on_run_requested(language, command)
+    assert FakeDialog.opened == []
+
+
+def test_a_watch_alert_never_offers_a_run_button(qapp: Any, acting: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    controller, _ = acting()
+    controller.window.actions_check.setChecked(True)
+    monkeypatch.setattr(controller.tray, "showMessage", lambda *a, **k: None)
+    controller._notify_finding("Possible error on your screen: rm -rf /", answer_with(("powershell", "Remove-Item -Recurse $HOME")))
+    (card,) = controller.window._exchanges
+    assert card.run_buttons == []  # the alert card has no code blocks, so nothing on it can be run
+
+
+def test_the_switch_is_remembered_across_restarts_and_shows_the_buttons(qapp: Any, acting: Any) -> None:
+    first, _ = acting()
+    MemorySettings.store["actions_enabled"] = True  # what an earlier run saved
+    restored = main.OmniSightController(qapp, main.ClientSettings(backend="auto", fallback_api_url=None), enable_hotkeys=False)
+    try:
+        assert restored._actions_enabled and restored.window.actions_check.isChecked()
+        restored.window.add_exchange("q", answer_with(("bash", "ls")))
+        assert restored.window._exchanges[0].run_buttons[0].isVisibleTo(restored.window)
+        assert not first._actions_enabled  # the first controller was built before the setting existed
+    finally:
+        restored.shutdown()
+
+
+def test_the_switch_and_the_run_button_have_accessible_names_and_honest_tooltips(qapp: Any) -> None:
+    window = MainWindow()
+    assert window.actions_check.accessibleName() == "Allow running commands"
+    tip = window.actions_check.toolTip()
+    assert "Off by default" in tip and "type RUN every time" in tip and "by itself" in tip
+    window.add_exchange("q", answer_with(("bash", "ls")))
+    assert "type RUN" in window._exchanges[0].run_buttons[0].toolTip()
+    window.set_actions_enabled(True)
+    assert window.actions_check.isChecked() and window._exchanges[0].run_buttons[0].isVisibleTo(window)
+    toggles: list[bool] = []
+    window.actions_toggled.connect(toggles.append)
+    window.set_actions_enabled(False)  # programmatic: no echo as a user toggle
+    assert toggles == []

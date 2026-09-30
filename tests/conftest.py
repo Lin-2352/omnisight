@@ -49,6 +49,8 @@ CLIENT_TEST_FILES = (
     "unit/test_memory_tts.py",
     "unit/test_search.py",
     "unit/test_watch.py",
+    "unit/test_actions.py",
+    "unit/test_run_dialog.py",
     "unit/test_main_window.py",
     "integration/test_dynamic_discovery.py",
     "integration/test_failover_circuit.py",

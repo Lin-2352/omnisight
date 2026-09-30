@@ -13,6 +13,7 @@ from __future__ import annotations
 import html
 from typing import Final
 
+from core.actions import is_shell_language
 from core.config import ENGINE_CHOICES
 from core.logger import get_logger
 from core.node_supervisor import NodeState, NodeStatus
@@ -82,7 +83,11 @@ def _button(text: str, name: str, style: str = _BUTTON, tooltip: str = "") -> QP
 class ExchangeWidget(QFrame):
     """One question and its answer."""
 
-    def __init__(self, question: str, result: ClientResult, parent: QWidget, searched: str = "", note: str = "") -> None:
+    run_requested = pyqtSignal(str, str)  # (code-block language, the command text): opens the approval dialog
+
+    def __init__(
+        self, question: str, result: ClientResult, parent: QWidget, searched: str = "", note: str = "", actions_enabled: bool = False
+    ) -> None:
         super().__init__(parent)
         response, metrics = result.response, result.metrics
         self.setStyleSheet(f"ExchangeWidget {{ background: {MANTLE}; border: 1px solid {SURFACE0}; border-radius: 10px; }}")
@@ -102,6 +107,21 @@ class ExchangeWidget(QFrame):
         actions = ActionWidget(self)
         actions.set_blocks([(block.language, block.code) for block in response.code_blocks])
         layout.addWidget(actions)
+        # "Run..." only opens a dialog that shows the exact command and asks for a typed confirmation; it never runs directly.
+        self.run_buttons: list[QPushButton] = []
+        shell_blocks = [(block.language, block.code) for block in response.code_blocks if is_shell_language(block.language)]
+        if shell_blocks:
+            run_row = QHBoxLayout()
+            run_row.setSpacing(8)
+            for number, (language, code) in enumerate(shell_blocks, start=1):
+                label = "Run..." if len(shell_blocks) == 1 else f"Run {number}..."
+                button = _button(label, f"Run command {number}", tooltip="Review this command in a dialog and run it only after you type RUN")
+                button.clicked.connect(lambda _checked=False, lang=language, cmd=code: self.run_requested.emit(lang, cmd))
+                button.setVisible(actions_enabled)
+                run_row.addWidget(button)
+                self.run_buttons.append(button)
+            run_row.addStretch(1)
+            layout.addLayout(run_row)
         if response.sources:
             lines = [f"Sources{f' (searched: {html.escape(searched)})' if searched else ''}"]
             for number, source in enumerate(response.sources, start=1):
@@ -147,6 +167,8 @@ class MainWindow(QWidget):
     search_toggled = pyqtSignal(bool)  # "Search the web"
     smart_toggled = pyqtSignal(bool)  # "Smart query"
     watch_toggled = pyqtSignal(bool)  # "Watch my screen"
+    actions_toggled = pyqtSignal(bool)  # "Allow running commands"
+    run_requested = pyqtSignal(str, str)  # (language, command) from a card's Run... button
     watch_pause_clicked = pyqtSignal()
 
     def __init__(self) -> None:
@@ -166,6 +188,7 @@ class MainWindow(QWidget):
         self._recording = False
         self._state = AppState.IDLE
         self._idle_text = "Ready."
+        self._actions_enabled = False
 
         root = QVBoxLayout(self)
         root.setContentsMargins(16, 14, 16, 14)
@@ -267,6 +290,14 @@ class MainWindow(QWidget):
         )
         self.search_check.toggled.connect(self._search_changed)
         options.addWidget(self.search_check)
+        self.actions_check = QCheckBox("Allow running commands", self)
+        self.actions_check.setAccessibleName("Allow running commands")
+        self.actions_check.setToolTip(
+            "Off by default. On: answers with a terminal command get a Run... button. It opens a dialog that shows the exact "
+            "command and needs you to type RUN every time. Nothing ever runs by itself."
+        )
+        self.actions_check.toggled.connect(self.actions_toggled)
+        options.addWidget(self.actions_check)
         self.smart_check = QCheckBox("Smart query", self)
         self.smart_check.setAccessibleName("Smart query")
         self.smart_check.setEnabled(False)
@@ -302,7 +333,7 @@ class MainWindow(QWidget):
         self.watch_label.hide()
         watch_row.addWidget(self.watch_label, 1)
         root.addLayout(watch_row)
-        for box in (self.screen_check, self.memory_check, self.speak_check, self.search_check, self.smart_check, self.watch_check):
+        for box in (self.screen_check, self.memory_check, self.speak_check, self.search_check, self.smart_check, self.watch_check, self.actions_check):
             box.setStyleSheet(f"QCheckBox {{ color: {TEXT}; spacing: 6px; }}")
 
         buttons = QHBoxLayout()
@@ -331,6 +362,14 @@ class MainWindow(QWidget):
             "Ask about your screen…  (Enter to send)" if on else "Message OmniSight (no screenshot is sent)…  (Enter to send)"
         )
         self.send_button.setToolTip("Capture the screen and ask this question" if on else "Send this message without the screen")
+
+    def set_actions_enabled(self, on: bool) -> None:
+        """Show or hide every Run... button (and remember it for answers that arrive later). Does not echo a toggle."""
+        self._actions_enabled = on
+        self._set_checked(self.actions_check, on)
+        for card in self._exchanges:
+            for button in card.run_buttons:
+                button.setVisible(on)
 
     def set_watch_enabled(self, on: bool) -> None:
         self._set_checked(self.watch_check, on)
@@ -445,7 +484,8 @@ class MainWindow(QWidget):
     def add_exchange(self, question: str, result: ClientResult, searched: str = "", note: str = "") -> None:
         self.notice.hide()
         self.empty_label.hide()
-        widget = ExchangeWidget(question, result, self._content, searched, note)
+        widget = ExchangeWidget(question, result, self._content, searched, note, self._actions_enabled)
+        widget.run_requested.connect(self.run_requested)
         self._list.insertWidget(self._list.count() - 1, widget)
         self._exchanges.append(widget)
         while len(self._exchanges) > MAX_EXCHANGES:

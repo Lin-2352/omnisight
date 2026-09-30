@@ -51,6 +51,7 @@ from capture.audio import (  # noqa: E402
 )
 from capture.screen import BlackFrameError, CaptureResult, ScreenCapturer  # noqa: E402
 from core.capability import describe, probe  # noqa: E402
+from core.actions import ActionRunner, is_shell_language  # noqa: E402
 from core.config import (  # noqa: E402
     BACKENDS,
     ENGINE_CHOICES,
@@ -116,6 +117,7 @@ from PyQt6.QtWidgets import (  # noqa: E402
     QLabel,
     QLineEdit,
     QMenu,
+    QMessageBox,
     QPushButton,
     QSystemTrayIcon,
     QVBoxLayout,
@@ -123,6 +125,7 @@ from PyQt6.QtWidgets import (  # noqa: E402
 from ui.components import BASE, BLUE, GREEN, SURFACE0, TEXT  # noqa: E402
 from ui.hud import HudWindow  # noqa: E402
 from ui.main_window import MainWindow  # noqa: E402
+from ui.run_dialog import RunDialog  # noqa: E402
 
 logger = get_logger("main")
 
@@ -500,6 +503,9 @@ class OmniSightController(QObject):
         self.memory = ConversationMemory(enabled=saved.value("memory_enabled", True, type=bool))
         self.speaker = Speaker()
         self.web_search = WebSearch()
+        self.actions = ActionRunner()
+        self._actions_enabled = bool(saved.value("actions_enabled", False, type=bool))
+        self._actions_cwd = Path(str(saved.value("actions_cwd", str(Path.home()))))
         self._search_enabled = bool(saved.value("web_search", False, type=bool))
         self._smart_enabled = bool(saved.value("smart_query", False, type=bool)) and self._search_enabled
         self.watch = WatchScheduler(_watch_interval())
@@ -546,6 +552,8 @@ class OmniSightController(QObject):
         self.window.stop_speaking_clicked.connect(self.stop_speaking)
         self.window.search_toggled.connect(self.set_search_enabled)
         self.window.watch_toggled.connect(self.set_watch_enabled)
+        self.window.actions_toggled.connect(self.set_actions_enabled)
+        self.window.run_requested.connect(self.on_run_requested)
         self.window.watch_pause_clicked.connect(self.toggle_watch_pause)
         self.window.smart_toggled.connect(self.set_smart_enabled)
         self.window.set_engine(self.settings.engine_choice)
@@ -553,6 +561,7 @@ class OmniSightController(QObject):
         self.window.set_speak_available(self.speaker.available)
         self.window.set_speak_enabled(self._speak_enabled)
         self.window.set_search_enabled(self._search_enabled)
+        self.window.set_actions_enabled(self._actions_enabled)
         self.window.set_smart_enabled(self._smart_enabled)
         self._watch_timer = QTimer(self)
         self._watch_timer.timeout.connect(self._watch_tick)
@@ -825,6 +834,37 @@ class OmniSightController(QObject):
         self._start_worker(request, LatencyMetrics())
 
     # -- watch mode (local engine only) -----------------------------------------------------------------
+
+    def set_actions_enabled(self, on: bool) -> None:
+        """The master switch for Run... buttons. Turning it on asks once, in plain words; it is remembered either way."""
+        if on and not self._actions_enabled:
+            answer = QMessageBox.question(
+                self.window,
+                "Allow running commands?",
+                "OmniSight will show a Run... button on answers that contain a terminal command. Clicking it opens a dialog with "
+                "the exact command; nothing runs until you type RUN, and never by itself.\n\n"
+                "The command is written by an AI model that reads your screen, and text on a screen or web page can influence it. "
+                "A few catastrophic commands are always refused, but this is not a sandbox: read every command.\n\n"
+                "Turn it on?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                self.window.set_actions_enabled(False)
+                return
+        self._actions_enabled = on
+        QSettings().setValue("actions_enabled", on)
+        self.window.set_actions_enabled(on)
+        logger.info("running commands %s", "allowed (each needs an approval)" if on else "off")
+
+    def on_run_requested(self, language: str, command: str) -> None:
+        """A card's Run... button: show the approval dialog (only when the switch is on and it is a terminal command)."""
+        if not self._actions_enabled or not is_shell_language(language) or not command.strip():
+            return
+        dialog = RunDialog(command, language, self.actions, self._actions_cwd, parent=self.window)
+        dialog.exec()
+        self._actions_cwd = dialog.cwd
+        QSettings().setValue("actions_cwd", str(self._actions_cwd))
 
     def set_watch_enabled(self, on: bool) -> None:
         """Start or stop watching the screen. Always off at start-up; only ever on a local engine."""
