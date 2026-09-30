@@ -723,7 +723,7 @@ def test_a_search_that_finds_nothing_warns_and_asks_for_no_cloud_search_by_defau
     ask(controller, qapp, "why?", 1)
     request = FakeWorker.instances[0].request
     assert request.web_results == [] and request.web_search is False
-    assert "unavailable" in controller.window.notice.text()
+    assert any("unavailable" in t for t in labels(controller.window._exchanges[0]))
 
 
 def test_with_smart_query_on_a_failed_search_lets_the_cloud_tier_try(qapp: Any, make_controller: Any, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -801,7 +801,7 @@ def test_an_engine_that_ignores_the_results_is_reported(qapp: Any, make_controll
     controller.window.search_check.setChecked(True)
     FakeWorker.echo_sources = False
     ask(controller, qapp, "why?", 1)
-    assert "could not use the web results" in controller.window.notice.text()
+    assert any("could not use the web results" in t for t in labels(controller.window._exchanges[0]))
     assert not any("Sources" in text for text in labels(controller.window._exchanges[0]))
 
 
@@ -1319,3 +1319,28 @@ def test_an_unprompted_alert_card_offers_no_code_to_copy(qapp: Any, watching: An
     controller._notify_finding("Build failed", ClientResult(response=response, metrics=LatencyMetrics(tier="local")))
     assert shown and shown[0].response.code_blocks == [] and shown[0].response.markdown == response.markdown
     assert tray.messages == [("OmniSight noticed something", "Build failed")]
+
+
+def test_a_search_problem_stays_visible_with_the_answer_it_affected(qapp: Any, make_controller: Any) -> None:
+    """The notice shown while the model works used to be hidden the moment the answer card was added."""
+    controller, _ = make_controller()
+    FakeSearch.outcome = SearchOutcome(query="q", notice="Web search is unavailable right now (Wikipedia: timeout). Answering without it.")
+    controller.window.search_check.setChecked(True)
+    ask(controller, qapp, "why?", 1)
+    texts = labels(controller.window._exchanges[0])
+    assert any("Web search is unavailable right now" in t for t in texts), texts  # the note is part of the answer's card
+
+
+def test_the_engine_ignoring_the_results_is_also_noted_on_the_answer_card(qapp: Any, make_controller: Any) -> None:
+    controller, _ = make_controller()
+    controller.window.search_check.setChecked(True)
+    FakeWorker.echo_sources = False
+    ask(controller, qapp, "why?", 1)
+    assert any("could not use the web results" in t for t in labels(controller.window._exchanges[0]))
+
+
+def test_an_answer_with_no_problem_has_no_note(qapp: Any, make_controller: Any) -> None:
+    controller, _ = make_controller()
+    controller.window.search_check.setChecked(True)
+    ask(controller, qapp, "why?", 1)
+    assert not any("unavailable" in t or "could not use" in t for t in labels(controller.window._exchanges[0]))

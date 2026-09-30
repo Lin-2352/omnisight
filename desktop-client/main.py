@@ -1233,9 +1233,12 @@ class OmniSightController(QObject):
         self.state.add_result(result.response, result.metrics)
         outcome = self._search_outcome
         attached = bool(outcome and outcome.results)
-        self.window.add_exchange(self._pending_question, result, outcome.query if attached and result.response.sources else "")
+        note = ""
         if attached and not result.response.sources:
-            self.window.show_notice("This engine could not use the web results, so it answered without them.")
+            note = "This engine could not use the web results, so it answered without them."
+        elif outcome is not None and not outcome.results and outcome.notice:
+            note = outcome.notice  # for example "Web search is unavailable right now ... Answering without it."
+        self.window.add_exchange(self._pending_question, result, outcome.query if attached and result.response.sources else "", note)
         question = self._pending_question or result.response.transcript or MODE_PHRASES[self._pending_mode]
         self.memory.add_exchange(question, result.response.markdown)
         if self._speak_enabled:

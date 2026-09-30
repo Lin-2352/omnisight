@@ -82,7 +82,7 @@ def _button(text: str, name: str, style: str = _BUTTON, tooltip: str = "") -> QP
 class ExchangeWidget(QFrame):
     """One question and its answer."""
 
-    def __init__(self, question: str, result: ClientResult, parent: QWidget, searched: str = "") -> None:
+    def __init__(self, question: str, result: ClientResult, parent: QWidget, searched: str = "", note: str = "") -> None:
         super().__init__(parent)
         response, metrics = result.response, result.metrics
         self.setStyleSheet(f"ExchangeWidget {{ background: {MANTLE}; border: 1px solid {SURFACE0}; border-radius: 10px; }}")
@@ -114,6 +114,13 @@ class ExchangeWidget(QFrame):
             sources.setWordWrap(True)
             sources.setStyleSheet(f"color: {SUBTEXT}; font-size: 9pt;")
             layout.addWidget(sources)
+        if note:
+            # Something that affected this answer (for example web search was down): shown with it, not in a
+            # transient banner that the arrival of the answer would hide.
+            note_label = QLabel(note, self)
+            note_label.setWordWrap(True)
+            note_label.setStyleSheet(f"color: {YELLOW}; font-size: 9pt;")
+            layout.addWidget(note_label)
         details = [f"{response.model_id} via {metrics.tier}", f"first token {metrics.server_ttft_ms / 1000:.1f}s"]
         if response.sources:
             details.append("web")
@@ -435,10 +442,10 @@ class MainWindow(QWidget):
         if self.notice.isVisible() and self._state not in BUSY_STATES:
             self.notice.hide()
 
-    def add_exchange(self, question: str, result: ClientResult, searched: str = "") -> None:
+    def add_exchange(self, question: str, result: ClientResult, searched: str = "", note: str = "") -> None:
         self.notice.hide()
         self.empty_label.hide()
-        widget = ExchangeWidget(question, result, self._content, searched)
+        widget = ExchangeWidget(question, result, self._content, searched, note)
         self._list.insertWidget(self._list.count() - 1, widget)
         self._exchanges.append(widget)
         while len(self._exchanges) > MAX_EXCHANGES:
