@@ -58,6 +58,31 @@ REWRITE_PROMPT: Final[str] = (
 MAX_SMART_QUERY_CHARS: Final[int] = 100
 
 
+#: Words that carry no search meaning. Stack Overflow's search needs every query word to match, so a
+#: full sentence ("how do I avoid a KeyError ...") finds nothing while its keywords do.
+STOPWORDS: Final[frozenset[str]] = frozenset(
+    "a an the i me my we you your it its is am are was were be been being do does did doing can could should would will "
+    "may might must how what why when where which who whom whose that this these those there here to of in on at by for "
+    "with about into from as and or but if so then than too very just not no yes please help get got make makes made "
+    "using use used want need trying tried keep keeps when while after before".split()
+)
+MAX_KEYWORDS: Final[int] = 6
+
+
+def keywords(query: str) -> str:
+    """The query reduced to its meaningful words (at most 6, original order, no duplicates)."""
+    seen: set[str] = set()
+    kept: list[str] = []
+    for word in re.findall(r"[\w'#+.\-]+", query):
+        token = word.strip("'-").rstrip(".")  # keeps the leading dot of ".net" and trailing "++" / "#"
+        bare = token.lower()
+        if not bare or bare in STOPWORDS or bare in seen:
+            continue
+        seen.add(bare)
+        kept.append(token)
+    return " ".join(kept[:MAX_KEYWORDS])
+
+
 class SearchError(Exception):
     """One provider could not answer (network, rate limit, unexpected reply)."""
 
@@ -148,6 +173,13 @@ class StackExchangeProvider:
         self._paused_until = 0.0
 
     def search(self, session: requests.Session, query: str, limit: int) -> list[WebResult]:
+        results = self._search(session, query, limit)
+        reduced = keywords(query)
+        if not results and reduced and reduced.casefold() != query.casefold() and len(query.split()) > 4:
+            results = self._search(session, reduced, limit)  # one retry, only when the whole sentence found nothing
+        return results
+
+    def _search(self, session: requests.Session, query: str, limit: int) -> list[WebResult]:
         if self._clock() < self._paused_until:
             raise SearchError("Stack Overflow asked clients to back off")
         params = {"order": "desc", "sort": "relevance", "q": query, "site": "stackoverflow", "pagesize": str(limit)}

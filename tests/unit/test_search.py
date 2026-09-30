@@ -314,3 +314,64 @@ def test_smart_query_with_an_empty_question_or_a_failing_engine_is_none() -> Non
 
     assert smart_query(broken, "a question") is None
 
+
+
+# -- keyword retry for Stack Overflow -------------------------------------------------------------------
+
+from core.search import keywords  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("how do I avoid a KeyError when a dictionary key may be missing in python", "avoid KeyError dictionary key missing python"),
+        ("why does my python script crash with KeyError: 'discount_rate'", "python script crash KeyError discount_rate"),
+        ("the the THE error error", "error"),
+        ("c++ vs c# .net 8 async/await", "c++ vs c# .net 8 async"),  # the 6-word cap
+        ("the .net runtime. is ok.", ".net runtime ok"),
+        ("", ""),
+        ("how do I", ""),
+        ("one two three four five six seven eight", "one two three four five six"),
+    ],
+)
+def test_keywords_reduce_a_sentence_to_its_meaningful_words(query: str, expected: str) -> None:
+    assert keywords(query) == expected
+
+
+def test_stack_overflow_retries_once_with_keywords_when_the_sentence_finds_nothing(http_mock: Any) -> None:
+    queries: list[str] = []
+
+    def reply(request: Any) -> tuple[int, dict[str, str], str]:
+        import json
+        from urllib.parse import parse_qs, urlsplit
+
+        q = parse_qs(urlsplit(request.url).query)["q"][0]
+        queries.append(q)
+        items = [se_item(9)] if q == "avoid KeyError dictionary key missing python" else []
+        return 200, {}, json.dumps({"items": items, "quota_remaining": 100})
+
+    http_mock.add_callback(responses.GET, SE_URL, callback=reply)
+    hits = StackExchangeProvider().search(requests.Session(), "how do I avoid a KeyError when a dictionary key may be missing in python", 3)
+    assert [h.url for h in hits] == ["https://stackoverflow.com/questions/9"]
+    assert queries == ["how do I avoid a KeyError when a dictionary key may be missing in python", "avoid KeyError dictionary key missing python"]
+
+
+def test_no_retry_when_the_first_search_has_results_or_the_query_is_short(http_mock: Any) -> None:
+    http_mock.get(SE_URL, json={"items": [se_item(1)]})
+    StackExchangeProvider().search(requests.Session(), "how do I avoid a KeyError when a dictionary key may be missing", 3)
+    assert len(http_mock.calls) == 1
+    http_mock.replace(responses.GET, SE_URL, json={"items": []})
+    StackExchangeProvider().search(requests.Session(), "python keyerror", 3)  # 2 words: nothing to reduce
+    assert len(http_mock.calls) == 2
+
+
+def test_the_retry_failing_does_not_turn_an_empty_search_into_an_error(http_mock: Any) -> None:
+    calls = {"n": 0}
+
+    def reply(request: Any) -> tuple[int, dict[str, str], str]:
+        calls["n"] += 1
+        return (200, {}, '{"items": []}') if calls["n"] == 1 else (500, {}, "{}")
+
+    http_mock.add_callback(responses.GET, SE_URL, callback=reply)
+    with pytest.raises(SearchError):  # the combined search treats this provider as failed, not as "no hits"
+        StackExchangeProvider().search(requests.Session(), "how do I avoid a KeyError when a dictionary key may be missing", 3)
