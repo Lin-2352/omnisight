@@ -23,6 +23,7 @@ from core.watch import (
     FLAT_SPREAD,
     GENERIC_FINDING,
     FindingTracker,
+    alert_text,
     WatchScheduler,
     frame_changed,
     frame_is_flat,
@@ -276,9 +277,14 @@ def test_a_very_long_finding_is_cut_on_a_word_boundary() -> None:
     assert finding is not None and len(finding) <= MAX_FINDING_CHARS and finding.endswith("…")
 
 
-def test_the_prompts_ask_a_yes_no_question_and_then_for_one_sentence() -> None:
+def test_alerts_are_framed_as_possible_errors_quoting_the_line() -> None:
+    assert alert_text("Segmentation fault (core dumped)") == "Possible error on your screen: Segmentation fault (core dumped)"
+    assert alert_text(GENERIC_FINDING) == GENERIC_FINDING  # already worded as a possibility
+
+
+def test_the_prompts_ask_a_yes_no_question_and_then_for_the_error_line() -> None:
     assert "exactly one word: YES or NO" in CHECK_PROMPT
-    assert "at most 15 words" in DESCRIBE_PROMPT and DESCRIBE_TOKENS == 40
+    assert "Copy the line" in DESCRIBE_PROMPT and "Reply with that line only" in DESCRIBE_PROMPT and DESCRIBE_TOKENS == 40
     assert GENERIC_FINDING.endswith("screen.")
 
 
@@ -339,3 +345,54 @@ def test_module_constants_are_sane(clock: ManualClock) -> None:
     assert MIN_GAP_S < MIN_INTERVAL_S < DEFAULT_INTERVAL_S < MAX_BACKOFF_S
     assert MAX_FAILURES >= 2
     _: Any = clock
+
+
+# -- a single new error line must count as a change (the typical "a process just crashed" case) ------------
+
+ERROR_LINE = "Segmentation fault (core dumped)"
+
+
+def with_line(image: Image.Image, y: int, font_px: int, text: str = ERROR_LINE) -> Image.Image:
+    out = image.copy()
+    ImageDraw.Draw(out).text((20, y), text, font=monospace_font(font_px), fill=(255, 255, 255))
+    return out
+
+
+@pytest.mark.parametrize(("y", "font_px"), [(660, 16), (690, 12), (600, 20)])
+def test_one_new_error_line_at_the_bottom_of_a_720p_terminal_is_a_change(base: Image.Image, y: int, font_px: int) -> None:
+    assert frame_changed(sig(base), sig(with_line(base, y, font_px)))
+
+
+def test_a_short_error_word_still_counts_when_it_is_the_only_change(base: Image.Image) -> None:
+    assert frame_changed(sig(base), sig(with_line(base, 660, 18, "FATAL: out of memory")))
+
+
+def test_one_new_error_line_on_a_1440p_screen_survives_the_capturers_downscale(make_capturer, screens: dict[str, Image.Image]) -> None:
+    """Through the real capture pipeline: the 2560x1440 frame is resized before it is fingerprinted."""
+    big = screens["1440p"]
+    capturer, _ = make_capturer([big, with_line(big, 1380, 18)])
+    before, after = capturer.capture(monitor_index=1), capturer.capture(monitor_index=1)
+    assert before.width < big.width  # it really was downscaled
+    assert frame_changed(frame_signature(before.image_b64), frame_signature(after.image_b64))
+
+
+def test_the_same_screen_captured_twice_is_not_a_change_through_the_real_pipeline(make_capturer, screens: dict[str, Image.Image]) -> None:
+    capturer, _ = make_capturer([screens["1440p"]])
+    a, b = capturer.capture(monitor_index=1), capturer.capture(monitor_index=1)
+    assert not frame_changed(frame_signature(a.image_b64), frame_signature(b.image_b64))
+
+
+def test_a_dark_screen_whose_only_content_is_one_error_line_is_not_flat() -> None:
+    dark = with_line(Image.new("RGB", (1280, 720), (24, 24, 27)), 680, 16)
+    assert not frame_is_flat(sig(dark))
+    assert frame_is_flat(sig(Image.new("RGB", (1280, 720), (24, 24, 27))))
+
+
+def test_a_cursor_clock_and_compression_noise_are_still_ignored_at_the_finer_grid(base: Image.Image) -> None:
+    cursor = base.copy()
+    ImageDraw.Draw(cursor).rectangle((300, 400, 310, 420), fill=(255, 255, 255))
+    clock = with_line(base, 10, 14, "12:34:56")
+    blink_and_clock = with_line(cursor, 10, 14, "12:34:57")
+    for variant in (cursor, clock, blink_and_clock):
+        assert not frame_changed(sig(base), sig(variant)), "a cursor or a clock must not cost a model call"
+    assert not frame_changed(sig(base, 90), sig(base, 30))

@@ -33,12 +33,23 @@ CHECK_PROMPT: Final[str] = (
     "Is an error message, exception, crash or failed build visible on this screen? "
     "Answer with exactly one word: YES or NO."
 )
-#: Step 2 (only after a new YES): what the error is, in a sentence.
-DESCRIBE_PROMPT: Final[str] = "In at most 15 words, say what error message, exception, crash or failed build is shown on this screen."
-#: Generation cap for the description: short, because every token costs time on a slow CPU.
+#: Step 2 (only after a new YES): the line that reports the error, copied verbatim. Measured on the local 2B:
+#: "describe it in 15 words" described the surrounding code instead of the error whenever the error was a
+#: small part of the screen; "copy the line" returned the error line itself on the crash, FATAL and
+#: build-failure screens, though on a traceback it sometimes copies the command above it. The alert is
+#: therefore worded as a *possible* error that quotes the line.
+DESCRIBE_PROMPT: Final[str] = (
+    "Copy the line of text on this screen that reports an error, exception or crash. Reply with that line only."
+)
+#: Generation cap for the copied line: short, because every token costs time on a slow CPU.
 DESCRIBE_TOKENS: Final[int] = 40
-#: Used when the description comes back empty: the alert is still worth showing.
+#: Used when the copied line comes back empty: the alert is still worth showing.
 GENERIC_FINDING: Final[str] = "An error message appears to be on your screen."
+
+
+def alert_text(finding: str) -> str:
+    """What the tray message says: the model's line, framed as a possibility (it can copy the wrong line)."""
+    return finding if finding == GENERIC_FINDING else f"Possible error on your screen: {finding}"
 DEFAULT_INTERVAL_S: Final[float] = 10.0
 MIN_INTERVAL_S: Final[float] = 5.0
 #: Fewest seconds between two ticks, even when the window changes.
@@ -47,17 +58,20 @@ MAX_BACKOFF_S: Final[float] = 120.0
 #: Consecutive failed ticks after which watching stops by itself.
 MAX_FAILURES: Final[int] = 3
 
-SIGNATURE_SIZE: Final[tuple[int, int]] = (32, 18)
-#: Mean absolute difference (0-255) above which a frame counts as changed.
+SIGNATURE_SIZE: Final[tuple[int, int]] = (128, 72)
+#: Mean absolute difference (0-255) above which a frame counts as changed (broad, subtle changes).
 CHANGE_MEAN: Final[float] = 2.0
-#: A cell counts as different when it moved by more than this (0-255)...
+#: A cell counts as different when it moved by more than this (0-255); JPEG noise stays far below it.
 CELL_DELTA: Final[int] = 24
-#: ...and the frame counts as changed when at least this fraction of the cells differ.
-CHANGE_CELLS: Final[float] = 0.02
+#: A frame counts as changed when at least this many cells differ. A new line of text covers 13-30
+#: cells at this resolution (cells are about 10 px), a blinking cursor one or two and a clock about
+#: four or five, so a single new error line counts and a cursor or clock does not. Text smaller than
+#: about 8 px tall in the image that is sent (a 14 px font on a 2560x1440 screen) is below the limit.
+CHANGE_CELLS: Final[int] = 8
 
 
 def frame_signature(image_b64: str) -> bytes:
-    """A 32x18 grayscale fingerprint of a base64 JPEG frame (JPEG draft mode makes this a few ms)."""
+    """A 128x72 grayscale fingerprint of a base64 JPEG frame (JPEG draft mode makes this a few ms)."""
     with Image.open(io.BytesIO(base64.b64decode(image_b64))) as image:
         image.draft("L", (SIGNATURE_SIZE[0] * 4, SIGNATURE_SIZE[1] * 4))
         small = image.convert("L").resize(SIGNATURE_SIZE, Image.Resampling.BOX)
@@ -82,7 +96,7 @@ def frame_changed(previous: bytes | None, current: bytes) -> bool:
         return True
     diffs = [abs(a - b) for a, b in zip(previous, current, strict=True)]
     mean = sum(diffs) / len(diffs)
-    cells = sum(1 for d in diffs if d > CELL_DELTA) / len(diffs)
+    cells = sum(1 for d in diffs if d > CELL_DELTA)
     return mean >= CHANGE_MEAN or cells >= CHANGE_CELLS
 
 

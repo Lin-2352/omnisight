@@ -1028,7 +1028,7 @@ def test_a_new_error_takes_two_steps_and_is_reported_once_and_not_stored(qapp: A
     check, describe = FakeWorker.instances
     assert describe.request.prompt == DESCRIBE_PROMPT and describe.request.image is not None and describe.request.max_new_tokens == 40
     assert describe.settings.backend == "local"
-    assert tray.messages == [("OmniSight noticed something", "A KeyError for 'discount_rate' is shown in a traceback.")]
+    assert tray.messages == [("OmniSight noticed something", "Possible error on your screen: A KeyError for 'discount_rate' is shown in a traceback.")]
     assert controller.window.exchange_count == 1
     assert any("Noticed while watching" in text for text in labels(controller.window._exchanges[0]))
     # the screen changes but the same error is still showing: a YES costs one call and no new alert
@@ -1053,7 +1053,7 @@ def test_a_cleared_screen_rearms_the_same_finding(qapp: Any, watching: Any) -> N
         FakeWorker.script = list(replies)
         show(fake, screen)
         tick(controller, qapp, clock)
-    assert [m[1] for m in tray.messages] == ["Build failed", "Build failed"]
+    assert [m[1] for m in tray.messages] == ["Possible error on your screen: Build failed"] * 2
 
 
 def test_an_empty_description_still_raises_the_alert(qapp: Any, watching: Any) -> None:
@@ -1185,7 +1185,7 @@ def test_a_yes_that_arrives_while_the_user_is_busy_is_not_described_and_is_looke
     FakeWorker.script = ["YES", "Build failed"]  # the second look: yes, then the description
     show(fake, error_screen())
     tick(controller, qapp, clock)
-    assert [m[1] for m in tray.messages] == ["Build failed"]
+    assert [m[1] for m in tray.messages] == ["Possible error on your screen: Build failed"]
 
 
 def test_a_watch_answer_that_arrives_after_stopping_is_ignored(qapp: Any, watching: Any) -> None:
@@ -1255,3 +1255,67 @@ def test_the_watch_controls_have_accessible_names(qapp: Any) -> None:
     assert toggles == [] and window.watch_check.isChecked()
     window.watch_check.setChecked(False)
     assert toggles == [False]
+
+
+@pytest.mark.parametrize("url", ["http://192.168.1.50:8000", "http://my-gpu-box.lan:8000", "https://example.com"])
+def test_watching_is_refused_when_the_local_node_is_on_another_machine(qapp: Any, watching: Any, url: str) -> None:
+    controller, fake, clock, _ = watching()
+    controller.settings = controller.settings.with_local_url(url)
+    controller.window.watch_check.setChecked(True)
+    assert not controller.watch.running and not controller.window.watch_check.isChecked()
+    assert "this PC" in controller.window.notice.text() and "leave this PC" in controller.window.notice.text()
+    clock.advance(60.0)
+    controller._watch_tick()
+    assert not FakeWorker.instances and fake.grabs <= 1  # nothing was captured for watching
+
+
+@pytest.mark.parametrize("url", ["http://127.0.0.1:8000", "http://localhost:8000", "http://[::1]:8000", "http://127.0.0.2:9000"])
+def test_loopback_node_addresses_are_accepted_for_watching(qapp: Any, watching: Any, url: str) -> None:
+    controller, fake, clock, _ = watching()
+    controller.settings = controller.settings.with_local_url(url)
+    controller.window.watch_check.setChecked(True)
+    assert controller.watch.running
+
+
+def test_changing_the_node_url_to_another_machine_stops_watching(qapp: Any, watching: Any) -> None:
+    controller, fake, clock, _ = watching()
+    controller.window.watch_check.setChecked(True)
+    assert controller.watch.running
+    controller.set_local_url("http://192.168.1.50:8000")
+    assert not controller.watch.running and not controller.window.watch_check.isChecked()
+    assert "leave this PC" in controller.window.notice.text()
+
+
+def test_a_request_is_never_sent_if_the_url_changed_after_watching_started(qapp: Any, watching: Any) -> None:
+    """The second guard: even if only ``settings`` changed (no UI path), the frame stays on this PC."""
+    controller, fake, clock, _ = watching()
+    controller.window.watch_check.setChecked(True)
+    controller.settings = controller.settings.with_local_url("http://192.168.1.50:8000")
+    tick(controller, qapp, clock)
+    assert not FakeWorker.instances and not controller.watch.running and controller._watch_image is None
+
+
+def test_turning_watching_on_with_the_cpu_engine_warns_that_it_is_slow(qapp: Any, watching: Any) -> None:
+    controller, fake, clock, _ = watching()
+    controller.set_engine("local_cpu")
+    controller.window.watch_check.setChecked(True)
+    assert controller.watch.running  # allowed, but with a warning
+    assert "CPU engine" in controller.window.notice.text() and "Local GPU is the intended engine" in controller.window.notice.text()
+
+
+def test_the_gpu_engine_gets_no_cpu_warning(qapp: Any, watching: Any) -> None:
+    controller, fake, clock, _ = watching()
+    controller.set_engine("local_gpu")
+    controller.window.watch_check.setChecked(True)
+    assert controller.watch.running and "CPU engine" not in controller.window.notice.text()
+
+
+def test_an_unprompted_alert_card_offers_no_code_to_copy(qapp: Any, watching: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    controller, fake, clock, tray = watching()
+    shown: list[Any] = []
+    monkeypatch.setattr(controller.window, "add_exchange", lambda question, result, searched="": shown.append(result))
+    response = AnalyzeResponse.model_validate(analyze_response_json())
+    assert response.code_blocks, "the fake answer contains a code block"
+    controller._notify_finding("Build failed", ClientResult(response=response, metrics=LatencyMetrics(tier="local")))
+    assert shown and shown[0].response.code_blocks == [] and shown[0].response.markdown == response.markdown
+    assert tray.messages == [("OmniSight noticed something", "Build failed")]

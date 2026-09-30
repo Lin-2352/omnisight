@@ -72,6 +72,7 @@ from core.watch import (  # noqa: E402
     DESCRIBE_TOKENS,
     GENERIC_FINDING,
     FindingTracker,
+    alert_text,
     WatchScheduler,
     frame_changed,
     frame_is_flat,
@@ -79,7 +80,7 @@ from core.watch import (  # noqa: E402
     parse_watch_reply,
     parse_yes_no,
 )
-from network.client import HealthCheckWorker, InferenceClient, InferenceWorker, build_request  # noqa: E402
+from network.client import HealthCheckWorker, InferenceClient, InferenceWorker, _is_loopback, build_request  # noqa: E402
 from network.schemas import (  # noqa: E402
     CONTRACT_VERSION,
     AnalysisMode,
@@ -770,6 +771,7 @@ class OmniSightController(QObject):
         self.resolver.update_settings(self.settings)
         self.node.set_url(self.settings.local_dev_url)
         QSettings().setValue("local_url", self.settings.local_dev_url)
+        self._stop_watching_if_not_local()
 
     # -- hotkeys ----------------------------------------------------------------
 
@@ -835,11 +837,17 @@ class OmniSightController(QObject):
                 "Watching needs a local engine, so your screen never leaves this PC. Pick Local GPU, Local CPU or Local auto first."
             )
             return
+        if not _is_loopback(self.settings.local_dev_url):
+            self.window.set_watch_enabled(False)
+            self.window.show_notice(WATCH_NOT_LOOPBACK)
+            return
         self._watch_signature = None
         self._watch_tracker.reset()
         self.watch.start()
         self._update_watch_ui()
         logger.info("watch mode on (every %.0f s, local engine only)", self.watch.interval_s)
+        if self.settings.local_device == "cpu":
+            self.window.show_notice(WATCH_ON_CPU)
 
     def toggle_watch_pause(self) -> None:
         if not self.watch.running:
@@ -882,8 +890,12 @@ class OmniSightController(QObject):
             logger.info("watch mode stopped: %s", notice)
 
     def _stop_watching_if_not_local(self) -> None:
-        if self.watch.running and self.settings.backend != "local":
+        if not self.watch.running:
+            return
+        if self.settings.backend != "local":
             self._stop_watching("Watching stopped: it only runs on a local engine, so your screen stays on this PC.")
+        elif not _is_loopback(self.settings.local_dev_url):
+            self._stop_watching(WATCH_NOT_LOOPBACK)
 
     def _cancel_watch_request(self) -> None:
         """A question from the user wins: drop a watch request that is still waiting for the model."""
@@ -938,6 +950,9 @@ class OmniSightController(QObject):
     def _send_watch_request(self, stage: str, prompt: str, max_new_tokens: int) -> None:
         """One request to the local node about the frame being looked at (step 1: yes/no, step 2: describe)."""
         self._watch_stage = stage
+        if not _is_loopback(self.settings.local_dev_url):  # second guard: never send a frame to another machine
+            self._stop_watching(WATCH_NOT_LOOPBACK)
+            return
         try:
             request = build_request(self._watch_image, mode=AnalysisMode.EXPLAIN, prompt=prompt, max_new_tokens=max_new_tokens)
         except ValueError as exc:
@@ -977,7 +992,7 @@ class OmniSightController(QObject):
         news = self._watch_tracker.report(parse_watch_reply(text) or GENERIC_FINDING)
         self._finish_watch_tick()
         if news:
-            self._notify_finding(news, result)
+            self._notify_finding(alert_text(news), result)
 
     def _on_watch_failed(self, message: str) -> None:
         if not self.watch.running:
@@ -997,7 +1012,9 @@ class OmniSightController(QObject):
         logger.info("watch: noticed something (%d characters)", len(finding))
         self._watch_notice_pending = True
         self.tray.showMessage("OmniSight noticed something", finding, QSystemTrayIcon.MessageIcon.Warning, 10000)
-        self.window.add_exchange("Noticed while watching", result)
+        # An unprompted card never offers "Copy Fix" / "Copy Terminal Command" for code the model read off the screen.
+        plain = result.model_copy(update={"response": result.response.model_copy(update={"code_blocks": []})})
+        self.window.add_exchange("Noticed while watching", plain)
 
     # -- web search ------------------------------------------------------------------------------------
 
@@ -1284,6 +1301,18 @@ class OmniSightController(QObject):
         self.tray.hide()
         self.hud.hide()
         self.window.hide()
+
+
+WATCH_NOT_LOOPBACK: Final[str] = (
+    "Watching only works with a model node on this PC (127.0.0.1 or localhost). The local node URL in Settings points "
+    "elsewhere, so your screen would leave this PC: watching is off."
+)
+
+
+WATCH_ON_CPU: Final[str] = (
+    "Watching on the CPU engine works but is slow: each check takes several seconds of CPU time and a question you ask "
+    "meanwhile can wait behind it. Local GPU is the intended engine for watching; you can pause any time."
+)
 
 
 def _watch_interval() -> float:
