@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import sys
 import threading
 from pathlib import Path
 from typing import Any
@@ -241,7 +243,7 @@ def test_port_in_use_and_health_probe_against_a_real_server(live_node: str) -> N
 def test_default_helpers() -> None:
     assert ns.repo_root().joinpath("scripts", "run-local-gpu.ps1").is_file()
     assert ns.describe_device(health(gpu=False, name="i9")) == "CPU: i9"
-    process = ns.default_spawn(["python", "-c", "print('hi')"], ns.repo_root(), {"PATH": ""})
+    process = ns.default_spawn([sys.executable, "-c", "print('hi')"], ns.repo_root(), dict(os.environ))
     assert "".join(process.stdout or "").strip() == "hi"
     process.wait(10)
 
