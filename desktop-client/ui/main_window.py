@@ -162,7 +162,6 @@ class MainWindow(QWidget):
         root.addLayout(header)
 
         self.status = QLabel("", self)
-        self.status.setAccessibleName("Status")
         self.status.setWordWrap(True)
         self.status.setStyleSheet(f"color: {SUBTEXT}; font-size: 9.5pt;")
         root.addWidget(self.status)
@@ -195,7 +194,6 @@ class MainWindow(QWidget):
         root.addWidget(self.scroll, 1)
 
         self.notice = QLabel("", self)
-        self.notice.setAccessibleName("Notice")
         self.notice.setWordWrap(True)
         self.notice.hide()
         root.addWidget(self.notice)
