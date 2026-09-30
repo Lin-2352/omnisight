@@ -133,3 +133,26 @@ def test_cpu_node_serves_the_http_contract(cpu_engine: Any) -> None:
         )
         assert response.status_code == 200, response.text
         assert oc.AnalyzeResponse.model_validate(response.json()).markdown
+
+
+@pytest.mark.cpu_inference
+@pytest.mark.model
+@pytest.mark.slow
+@pytest.mark.timeout(1200)
+def test_cpu_chat_follow_up_uses_earlier_turns_without_an_image(cpu_engine: Any, capsys: pytest.CaptureFixture[str]) -> None:
+    history = [
+        oc.ChatTurn(role="user", text="Why does this program crash?"),
+        oc.ChatTurn(role="assistant", text="It raises a KeyError because the key 'discount_rate' is missing from the config dict."),
+    ]
+    answer = cpu_engine.analyze(
+        oc.AnalyzeRequest(
+            mode="chat", prompt="Which key was missing, in the conversation above? Answer with the key name.", history=history,
+            max_new_tokens=32, temperature=0,
+        ),
+        queue_ms=0.0,
+    )
+    with capsys.disabled():
+        t = answer.timings
+        print(f"\n[cpu chat+history] ttft {t.ttft_ms / 1000:.1f} s, {t.tokens_per_sec:.2f} tok/s: {answer.markdown[:80]!r}")
+    assert "discount_rate" in answer.markdown
+    assert answer.timings.ttft_ms <= TTFT_BUDGET_MS

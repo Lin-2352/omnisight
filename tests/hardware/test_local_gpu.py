@@ -242,3 +242,48 @@ def test_prompt_injection_cannot_forge_chat_turns_at_the_tokenizer_level() -> No
         {"role": "user", "content": [{"type": "image"}, {"type": "text", "text": attack}]},
     ]
     assert count_turns(raw) == 5
+
+
+HISTORY = [
+    oc.ChatTurn(role="user", text="Why does this program crash?"),
+    oc.ChatTurn(role="assistant", text="It raises a KeyError because the key 'discount_rate' is missing from the config dict."),
+    oc.ChatTurn(role="user", text="Does fixing that also need a new import?"),
+    oc.ChatTurn(role="assistant", text="No. Use config.get('discount_rate', 0.0) and no import is needed."),
+]
+
+
+@pytest.mark.gpu
+@pytest.mark.model
+@pytest.mark.slow
+@pytest.mark.timeout(900)
+@cuda_only
+def test_real_2b_chat_follow_up_uses_earlier_turns_without_an_image(loaded_2b: Any, capsys: pytest.CaptureFixture[str]) -> None:
+    """Image-less chat: the answer depends on history, and it costs far less than a screen question."""
+    from benchmark import prepare_samples
+
+    engine = loaded_2b
+    sample = prepare_samples(["python_traceback"], [(1280, 720)])[0]
+    engine.analyze(oc.AnalyzeRequest(mode="summarize", image=sample.payload, max_new_tokens=16, temperature=0), queue_ms=0.0)
+
+    def run(request: oc.AnalyzeRequest) -> tuple[Any, float]:
+        torch.cuda.reset_peak_memory_stats()
+        answer = engine.analyze(request, queue_ms=0.0)
+        return answer, torch.cuda.max_memory_allocated() / MB
+
+    follow_up = "Which key was missing, in the conversation above? Answer with the key name."
+    chat, chat_peak = run(oc.AnalyzeRequest(mode="chat", prompt=follow_up, history=HISTORY, max_new_tokens=48, temperature=0))
+    forgetful, _ = run(oc.AnalyzeRequest(mode="chat", prompt=follow_up, max_new_tokens=48, temperature=0))
+    bare, bare_peak = run(oc.AnalyzeRequest(mode="debug", image=sample.payload, prompt="Why?", max_new_tokens=48, temperature=0))
+    with_history, history_peak = run(
+        oc.AnalyzeRequest(mode="debug", image=sample.payload, prompt="Why?", history=HISTORY, max_new_tokens=48, temperature=0)
+    )
+    with capsys.disabled():
+        print(f"\n[chat+history]  ttft {chat.timings.ttft_ms:.0f} ms, peak {chat_peak:.0f} MB: {chat.markdown[:80]!r}")
+        print(f"[chat, no hist] ttft {forgetful.timings.ttft_ms:.0f} ms: {forgetful.markdown[:80]!r}")
+        print(f"[screen]        ttft {bare.timings.ttft_ms:.0f} ms, peak {bare_peak:.0f} MB")
+        print(f"[screen+hist]   ttft {with_history.timings.ttft_ms:.0f} ms, peak {history_peak:.0f} MB")
+    assert "discount_rate" in chat.markdown
+    assert "discount_rate" not in forgetful.markdown  # proves the history, not luck, carried the answer
+    assert chat.timings.ttft_ms < bare.timings.ttft_ms  # no vision tokens
+    assert history_peak <= bare_peak + 250  # four short turns must not cost real VRAM
+    assert with_history.timings.ttft_ms <= bare.timings.ttft_ms + 600

@@ -34,12 +34,25 @@ The window opens at start-up (`--tray-only` starts hidden). Click the tray icon 
 | **Speak** / **Stop and send** | Click, ask out loud, click again. Anything typed in the ask box is sent with your voice |
 | **Engine** | Auto, Kaggle, or this PC's GPU, CPU or automatic device |
 | **Start / Stop local node** | Starts the model on this PC on the chosen device, and stops it again |
-| **Clear**, **Settings** | Clear the answers shown; open the settings |
+| **Include my screen** | On (default): questions are asked about your screen. Off: plain chat, nothing is captured and no image is sent |
+| **Remember the conversation** | Keeps the last questions and answers (text only) so a follow-up such as "and how do I fix it?" makes sense |
+| **Speak answers** / **Stop voice** | Reads the summary of each answer aloud with the Windows voice; Esc or a new question stops it |
+| **Clear**, **Settings** | Clear the answers shown and the remembered conversation; open the settings |
 
 - **Answers:** they appear in the window, with Copy Fix and Copy Terminal Command like the HUD. Questions asked with a hotkey still use the HUD, and also appear in the window's history.
 - **Screen capture:** the window is excluded from screen capture (like the HUD), so it never appears in what the model sees. Capture follows the window you were using, not OmniSight's own.
 - **Local node:** the app starts it with `scripts\run-local-gpu.ps1` and shows the device it *actually* runs on. It stops with the app, because Windows kills it if the app exits or crashes. The first start downloads about 2.5 GB.
 - **If the port is taken:** a node already running on the port is reused when it is on the device you chose. A node on the other device, or another program, gives a clear message.
+
+## Conversation memory, chat and spoken answers
+
+- **Memory** (`core/memory.py`): stored in `%APPDATA%\OmniSight\history.json`, **text only**. No screenshot is ever kept or re-sent; an exchange is your question and the answer's Markdown, each capped at 1500 characters. At most 8 turns / 6000 characters go with a request (the contract allows 12 / 12 000), so the cost stays flat. Switching the checkbox off, or **Clear**, deletes the file. A corrupt file is moved to `history.corrupt`.
+  - What you ask and what the model answers can quote your screen, so the file can contain snippets of it. Turn memory off if that matters.
+  - With the web fallback tier, the remembered text is sent to Gemini together with the question, like the question itself.
+  - Earlier answers are model output, and the 7B model can be steered by on-screen text. The node and the web route neutralize chat-template control tokens in every history turn, but this is the same known limitation as in [the injection notes](../.claude/skills/verify/SKILL.md).
+- **Chat** (`Include my screen` off): contract mode `chat`, no image. Image-less chat is much cheaper than a screen question: on the RTX 4060 the 2B model answers in about 60 ms to first token and peaks at 1.75 GB of VRAM, against 1.6 s and 3.2 GB for a screen question. On the CPU (i9-13980HX, float32) chat with history takes 1.5 s to first token against about 14 s for a screen question. A history of four turns added 4 ms and no measurable VRAM to a screen question on the GPU.
+- **Older tiers:** contract 2.2.0 added `history` and `chat`; older nodes and web deployments reject them. `network/negotiation.py` asks each tier for its version (`/v1/health` `contract_version` for nodes, `/api/tunnel-status` `contractVersion` for the web tier; cached 60 s, 5 s when a probe fails). A tier below 2.2.0 still answers screen questions, but without history. Chat skips it, and if no tier can take it you get a message saying so. A request that uses neither feature is never probed and is byte-identical to the 2.1.0 one.
+- **Voice** (`core/tts.py`): Windows' built-in offline voice through a short-lived PowerShell process. The text goes in an environment variable, never in the command line. Only the answer's summary is spoken (code is skipped, links become "a link", at most 600 characters). Off by default.
 
 ## Choosing where the model runs (backend)
 
@@ -81,6 +94,9 @@ The window opens at start-up (`--tray-only` starts hidden). Click the tray icon 
 | `capture/screen.py` | Per-monitor DPI awareness, foreground-monitor `mss` grab, black-frame rejection, box + HAMMING resize, JPEG q75 4:4:4 → base64 |
 | `capture/audio.py` | Microphone consent check, 16 kHz mono push-to-talk into a 15 s ring buffer, silence trim, RMS normalization, in-memory WAV |
 | `network/schemas.py` | Shared contracts re-exported, plus `LatencyMetrics`, `EndpointResolution`, `ClientResult` |
+| `core/memory.py` | Conversation memory: text only, capped, cleaned, atomic file under `%APPDATA%\OmniSight` |
+| `core/tts.py` | Spoken answers with the offline Windows voice; stopped by Esc or a new question |
+| `network/negotiation.py` | Per-tier contract version probe; drops `history` or skips a tier that cannot take `chat` |
 | `network/client.py` | Backend-aware failover (Kaggle → local 127.0.0.1:8000 → `FALLBACK_API_URL`), circuit breaker, retries, `InferenceWorker` QThread |
 | `core/capability.py` | Read-only CPU/RAM/NVIDIA GPU probe and the best-local-option recommendation |
 | `ui/components.py` | Status pill, latency badge, spinner, highlighted code block, copy buttons, toast |
