@@ -30,6 +30,7 @@ from omnisight_contracts import (
     HealthResponse,
     ImagePayload,
     InferenceTimings,
+    WebResult,
     split_markdown_segments,
 )
 
@@ -102,5 +103,6 @@ __all__ = [
     "InferenceTimings",
     "LatencyMetrics",
     "Tier",
+    "WebResult",
     "split_markdown_segments",
 ]

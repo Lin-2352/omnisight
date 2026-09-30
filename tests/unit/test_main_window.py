@@ -8,6 +8,7 @@ recorder and the QSettings store are replaced so nothing real starts and no regi
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -20,9 +21,10 @@ from capture import screen
 from capture.audio import RecordingResult
 from core.foreground import WindowInfo
 from core.memory import ConversationMemory
+from core.search import SearchOutcome
 from core.node_supervisor import NodeState, NodeStatus
 from core.state import AppState
-from network.schemas import AnalysisMode, AnalyzeResponse, ClientResult, LatencyMetrics
+from network.schemas import AnalysisMode, AnalyzeResponse, ClientResult, LatencyMetrics, WebResult
 from tests.support import FakeMss, analyze_response_json, render_terminal, wait_until, wav_bytes
 from ui.main_window import MAX_EXCHANGES, MainWindow
 
@@ -47,6 +49,7 @@ class FakeWorker(QObject):
     tier_changed = pyqtSignal(str)
     finished = pyqtSignal()
     instances: list[FakeWorker] = []
+    echo_sources = True
 
     def __init__(self, settings: Any, resolver: Any, request: Any, base_metrics: Any = None) -> None:
         super().__init__()
@@ -58,9 +61,10 @@ class FakeWorker(QObject):
 
     def _run(self) -> None:
         self.tier_changed.emit("local")
-        response = AnalyzeResponse.model_validate(
-            analyze_response_json(str(self.request.request_id), source="kaggle", model_id="fake/engine")
-        )
+        body = analyze_response_json(str(self.request.request_id), source="kaggle", model_id="fake/engine")
+        if FakeWorker.echo_sources:  # like the real node: the results it was given are its sources
+            body["sources"] = [r.model_dump() for r in self.request.web_results]
+        response = AnalyzeResponse.model_validate(body)
         result = ClientResult(response=response, metrics=LatencyMetrics(tier="local", server_ttft_ms=1500, tokens_generated=42))
         self.succeeded.emit(result.model_dump(mode="json"))
         self.finished.emit()
@@ -114,6 +118,26 @@ class FakeSpeaker:
         FakeSpeaker.stops += 1
 
 
+class FakeSearch:
+    """Stands in for the web: records the queries and returns canned results (optionally after a gate)."""
+
+    queries: list[str] = []
+    gate: threading.Event | None = None
+    outcome: SearchOutcome | None = None
+
+    def search(self, text: str) -> SearchOutcome:
+        if FakeSearch.gate is not None:
+            FakeSearch.gate.wait(10)
+        FakeSearch.queries.append(text)
+        if FakeSearch.outcome is not None:
+            return FakeSearch.outcome
+        results = [
+            WebResult(title="KeyError in Python", url="https://stackoverflow.com/q/1", snippet="Use dict.get."),
+            WebResult(title="Dictionary", url="https://en.wikipedia.org/wiki/Dictionary", snippet=""),
+        ]
+        return SearchOutcome(query=text, results=results, providers=["Stack Overflow", "Wikipedia"])
+
+
 class FakeRecorder:
     def __init__(self) -> None:
         self.recording = False
@@ -140,6 +164,8 @@ def make_controller(qapp: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         MemorySettings.store = {}
         FakeWorker.instances = []
         FakeSpeaker.spoken, FakeSpeaker.stops = [], 0
+        FakeSearch.queries, FakeSearch.gate, FakeSearch.outcome = [], None, None
+        FakeWorker.echo_sources = True
         fake = FakeMss(frames or [render_terminal(1280, 720)])
         monkeypatch.setattr(screen, "BLACK_FRAME_RETRY_DELAY_S", 0.0)
         real_capturer = screen.ScreenCapturer
@@ -154,6 +180,7 @@ def make_controller(qapp: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         monkeypatch.setattr(main, "InferenceWorker", FakeWorker)
         monkeypatch.setattr(main, "NodeSupervisor", FakeNode)
         monkeypatch.setattr(main, "Speaker", FakeSpeaker)
+        monkeypatch.setattr(main, "WebSearch", FakeSearch)
         monkeypatch.setattr(
             main, "ConversationMemory", lambda enabled=True: ConversationMemory(tmp_path / "history.json", enabled=enabled)
         )
@@ -581,3 +608,193 @@ def test_the_new_controls_have_accessible_names_and_lock_while_busy(qapp: Any) -
     assert not window.screen_check.isEnabled()
     window.set_app_state(AppState.IDLE)
     assert window.screen_check.isEnabled()
+
+
+# ---------------------------------------------------------------------------
+# Web search
+# ---------------------------------------------------------------------------
+
+
+def labels(widget: Any) -> list[str]:
+    from PyQt6.QtWidgets import QLabel
+
+    return [label.text() for label in widget.findChildren(QLabel)]
+
+
+def test_search_is_off_by_default_and_nothing_is_searched(qapp: Any, make_controller: Any) -> None:
+    controller, _ = make_controller()
+    assert not controller.window.search_check.isChecked() and not controller.window.smart_check.isEnabled()
+    ask(controller, qapp, "why does this crash?", 1)
+    assert FakeSearch.queries == []
+    request = FakeWorker.instances[0].request
+    assert request.web_results == [] and request.web_search is False
+
+
+def test_a_typed_screen_question_is_searched_and_the_results_ride_with_the_request(qapp: Any, make_controller: Any) -> None:
+    controller, _ = make_controller()
+    controller.window.search_check.setChecked(True)
+    assert MemorySettings.store["web_search"] is True and controller.window.smart_check.isEnabled()
+    ask(controller, qapp, "why does this crash?", 1)
+    assert FakeSearch.queries == ["why does this crash?"]
+    request = FakeWorker.instances[0].request
+    assert [r.title for r in request.web_results] == ["KeyError in Python", "Dictionary"]
+    assert request.web_search is False and request.mode is AnalysisMode.EXPLAIN and request.image is not None
+    card = labels(controller.window._exchanges[0])
+    assert any("Sources (searched: why does this crash?)" in text and "stackoverflow.com/q/1" in text for text in card)
+    assert any(text.endswith("  ·  ".join(["fake/engine via local", "first token 1.5s", "confidence 87%", "web"])) or "web" in text.split("  ·  ") for text in card)
+
+
+def test_chat_is_searched_too(qapp: Any, make_controller: Any) -> None:
+    controller, fake = make_controller()
+    controller.window.search_check.setChecked(True)
+    controller.window.screen_check.setChecked(False)
+    ask(controller, qapp, "what is a generator?", 1)
+    request = FakeWorker.instances[0].request
+    assert request.mode is AnalysisMode.CHAT and request.image is None and len(request.web_results) == 2
+    assert FakeSearch.queries == ["what is a generator?"]
+
+
+def test_hotkeys_and_the_capture_button_have_no_typed_question_so_nothing_is_searched(qapp: Any, make_controller: Any) -> None:
+    controller, _ = make_controller()
+    controller.window.search_check.setChecked(True)
+    controller.on_capture_requested()
+    assert wait_until(lambda: len(FakeWorker.instances) == 1, TIMEOUT_S, pump(qapp))
+    request = FakeWorker.instances[0].request
+    assert FakeSearch.queries == [] and request.web_results == [] and request.web_search is False
+
+
+def test_a_spoken_question_asks_the_cloud_tier_to_ground_itself_instead(qapp: Any, make_controller: Any) -> None:
+    controller, _ = make_controller()
+    controller.window.search_check.setChecked(True)
+    controller.on_voice_pressed()
+    controller.on_voice_released()
+    assert wait_until(lambda: len(FakeWorker.instances) == 1, TIMEOUT_S, pump(qapp))
+    request = FakeWorker.instances[0].request
+    assert FakeSearch.queries == [] and request.web_results == [] and request.web_search is True
+
+
+def test_a_typed_note_with_voice_is_the_query(qapp: Any, make_controller: Any) -> None:
+    controller, _ = make_controller()
+    controller.window.search_check.setChecked(True)
+    controller.on_voice_pressed(origin="window", prompt="python keyerror")
+    controller.on_voice_released()
+    assert wait_until(lambda: len(FakeWorker.instances) == 1, TIMEOUT_S, pump(qapp))
+    assert FakeSearch.queries == ["python keyerror"] and len(FakeWorker.instances[0].request.web_results) == 2
+
+
+def test_a_search_that_finds_nothing_warns_and_lets_the_cloud_tier_try(qapp: Any, make_controller: Any) -> None:
+    controller, _ = make_controller()
+    FakeSearch.outcome = SearchOutcome(query="q", notice="Web search is unavailable right now. Answering without it.")
+    controller.window.search_check.setChecked(True)
+    ask(controller, qapp, "why?", 1)
+    request = FakeWorker.instances[0].request
+    assert request.web_results == [] and request.web_search is True
+    assert controller.window.notice.isVisible() or "unavailable" in controller.window.notice.text()
+
+
+def test_the_request_waits_for_a_slow_search_and_then_goes_out(qapp: Any, make_controller: Any) -> None:
+    controller, _ = make_controller()
+    controller.window.search_check.setChecked(True)
+    FakeSearch.gate = threading.Event()
+    controller.window.ask_box.setText("slow question")
+    controller.window.send_button.click()
+    assert wait_until(lambda: controller._held_capture is not None, TIMEOUT_S, pump(qapp))  # capture done, search not
+    assert FakeWorker.instances == [] and controller.window.status.text() == "Searching the web…"
+    FakeSearch.gate.set()
+    assert wait_until(lambda: controller.window.exchange_count == 1, TIMEOUT_S, pump(qapp))
+    assert len(FakeWorker.instances[0].request.web_results) == 2
+
+
+def test_a_stale_search_result_is_ignored(qapp: Any, make_controller: Any) -> None:
+    controller, _ = make_controller()
+    controller.window.search_check.setChecked(True)
+    ask(controller, qapp, "first", 1)
+    stale = controller._search_token - 1
+    controller._search_outcome = None
+    controller._on_search_done(stale, SearchOutcome(query="old", results=[]))
+    assert controller._search_outcome is None
+
+
+def test_an_engine_that_ignores_the_results_is_reported(qapp: Any, make_controller: Any) -> None:
+    controller, _ = make_controller()
+    controller.window.search_check.setChecked(True)
+    FakeWorker.echo_sources = False
+    ask(controller, qapp, "why?", 1)
+    assert "could not use the web results" in controller.window.notice.text()
+    assert not any("Sources" in text for text in labels(controller.window._exchanges[0]))
+
+
+def test_smart_query_rewrites_the_question_and_the_rewrite_is_what_is_searched(qapp: Any, make_controller: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    controller, _ = make_controller()
+    asked: list[Any] = []
+
+    class FakeClient:
+        def __init__(self, settings: Any, resolver: Any) -> None:
+            asked.append(settings)
+
+        def analyze(self, request: Any) -> Any:
+            asked.append(request)
+            response = AnalyzeResponse.model_validate({**analyze_response_json(), "markdown": '"python keyerror dict get"\nextra words'})
+            return ClientResult(response=response, metrics=LatencyMetrics())
+
+    monkeypatch.setattr(main, "InferenceClient", FakeClient)
+    controller.window.search_check.setChecked(True)
+    controller.window.smart_check.setChecked(True)
+    assert MemorySettings.store["smart_query"] is True
+    ask(controller, qapp, "why does my thing break when the key is missing???", 1)
+    assert FakeSearch.queries == ["python keyerror dict get"]
+    settings, request = asked
+    assert settings.fallback_api_url is None  # the rewrite never goes to the web tier
+    assert request.mode is AnalysisMode.CHAT and request.image is None and "why does my thing break" in request.prompt
+
+
+def test_smart_query_failure_falls_back_to_the_typed_question(qapp: Any, make_controller: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    controller, _ = make_controller()
+
+    class Broken:
+        def __init__(self, settings: Any, resolver: Any) -> None:
+            pass
+
+        def analyze(self, request: Any) -> Any:
+            raise RuntimeError("no node")
+
+    monkeypatch.setattr(main, "InferenceClient", Broken)
+    controller.window.search_check.setChecked(True)
+    controller.window.smart_check.setChecked(True)
+    ask(controller, qapp, "typed question", 1)
+    assert FakeSearch.queries == ["typed question"]
+
+
+def test_turning_search_off_turns_smart_query_off_and_the_settings_persist(qapp: Any, make_controller: Any) -> None:
+    controller, _ = make_controller()
+    controller.window.search_check.setChecked(True)
+    controller.window.smart_check.setChecked(True)
+    controller.window.search_check.setChecked(False)
+    assert not controller.window.smart_check.isChecked() and not controller.window.smart_check.isEnabled()
+    assert MemorySettings.store["web_search"] is False and MemorySettings.store["smart_query"] is False
+    assert not controller._smart_enabled and not controller._search_enabled
+
+
+def test_the_search_boxes_follow_the_busy_state_and_have_accessible_names(qapp: Any) -> None:
+    window = MainWindow()
+    assert {window.search_check.accessibleName(), window.smart_check.accessibleName()} == {"Search web", "Smart query"}
+    window.set_search_enabled(True)
+    assert window.search_check.isChecked() and window.smart_check.isEnabled()
+    window.set_smart_enabled(True)
+    assert window.smart_check.isChecked()
+    window.set_app_state(AppState.ANALYZING)
+    assert not window.search_check.isEnabled()
+    window.set_app_state(AppState.IDLE)
+    assert window.search_check.isEnabled()
+    window.set_progress("Searching the web…")
+    assert window.status.text() == "Searching the web…"
+
+
+def test_source_links_are_escaped_so_a_hostile_title_cannot_inject_markup(qapp: Any) -> None:
+    hostile = WebResult(title='<img src=x onerror="alert(1)"> & more', url="https://example.com/a?x=1&y=\"2\"", snippet="")
+    response = AnalyzeResponse.model_validate({**analyze_response_json(), "sources": [hostile.model_dump()]})
+    window = MainWindow()
+    window.add_exchange("q", ClientResult(response=response, metrics=LatencyMetrics(tier="local")), "a <b>query</b>")
+    text = next(t for t in labels(window._exchanges[0]) if t.startswith("Sources"))
+    assert "<img" not in text and "&lt;img" in text and "a &lt;b&gt;query&lt;/b&gt;" in text
+    assert 'href="https://example.com/a?x=1&amp;y=&quot;2&quot;"' in text

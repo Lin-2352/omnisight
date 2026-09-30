@@ -56,6 +56,7 @@ from network.schemas import (
     ImagePayload,
     LatencyMetrics,
     Tier,
+    WebResult,
 )
 
 logger = get_logger("network")
@@ -179,6 +180,8 @@ def build_request(
     max_new_tokens: int = 512,
     platform: str = "win32",
     history: Sequence[ChatTurn] = (),
+    web_results: Sequence[WebResult] = (),
+    web_search: bool = False,
 ) -> AnalyzeRequest:
     """Assemble a contract-valid ``AnalyzeRequest`` (raises ``ValidationError`` if not).
 
@@ -199,6 +202,8 @@ def build_request(
         audio=audio,
         prompt=prompt,
         history=list(history),
+        web_results=list(web_results),
+        web_search=web_search,
         max_new_tokens=max_new_tokens,
         client=ClientInfo(kind="desktop", version=CONTRACT_VERSION, platform=platform),
     )

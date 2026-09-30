@@ -30,6 +30,11 @@ logger = get_logger("negotiation")
 
 #: First contract version that understands ``history`` and ``chat``.
 HISTORY_CONTRACT: Final[tuple[int, int, int]] = (2, 2, 0)
+#: First contract version that understands ``web_results`` and ``web_search``.
+WEB_CONTRACT: Final[tuple[int, int, int]] = (2, 3, 0)
+#: Request fields a tier older than the one that introduced them rejects, even when empty.
+OPTIONAL_FIELDS: Final[frozenset[str]] = frozenset({"history", "web_results", "web_search"})
+WEB_FIELDS: Final[frozenset[str]] = frozenset({"web_results", "web_search"})
 #: How long a probe answer is trusted.
 PROBE_TTL_S: Final[float] = 60.0
 #: A tier that could not be probed (still booting, blip) is asked again soon.
@@ -61,6 +66,15 @@ def supports_history(version: str | None) -> bool:
     return parsed is not None and parsed >= HISTORY_CONTRACT
 
 
+def supports_web(version: str | None) -> bool:
+    parsed = parse_version(version)
+    return parsed is not None and parsed >= WEB_CONTRACT
+
+
+def uses_web(request: AnalyzeRequest) -> bool:
+    return bool(request.web_results) or request.web_search
+
+
 def needs_new_contract(request: AnalyzeRequest) -> bool:
     """True when the request cannot be expressed in contract 2.1.0 at all."""
     return request.mode is AnalysisMode.CHAT or request.image is None
@@ -69,21 +83,36 @@ def needs_new_contract(request: AnalyzeRequest) -> bool:
 def request_body(request: AnalyzeRequest, *, tier_version: str | None = None, negotiated: bool = False) -> bytes | None:
     """Serialize ``request`` for one tier, or ``None`` if that tier cannot take it.
 
-    An empty ``history`` is never sent, so a request that uses no new feature is byte-compatible with
-    a 2.1.0 tier and needs no probe. ``negotiated`` says the tier's version is known
-    (``tier_version`` may still be ``None`` for "could not be probed").
+    Optional fields are never sent empty, so a request that uses no new feature is byte-compatible
+    with a 2.1.0 tier and needs no probe. A field the tier does not know is left out, not emptied:
+    tiers reject unknown keys. ``negotiated`` says the tier's version is known (``tier_version`` may
+    still be ``None`` for "could not be probed").
     """
-    if not request.history and not needs_new_contract(request):
-        return request.model_dump_json(exclude={"history"}).encode("utf-8")
+    if not needs_probe(request):
+        return request.model_dump_json(exclude=set(OPTIONAL_FIELDS)).encode("utf-8")
+    if negotiated and supports_web(tier_version):
+        return request.model_dump_json(exclude=_empty_optional(request)).encode("utf-8")
     if negotiated and supports_history(tier_version):
-        return request.model_dump_json().encode("utf-8")
+        return request.model_dump_json(exclude=set(WEB_FIELDS) | _empty_optional(request)).encode("utf-8")
     if needs_new_contract(request):
         return None
-    return request.model_copy(update={"history": []}).model_dump_json(exclude={"history"}).encode("utf-8")
+    return request.model_dump_json(exclude=set(OPTIONAL_FIELDS)).encode("utf-8")
+
+
+def _empty_optional(request: AnalyzeRequest) -> set[str]:
+    """Optional fields that carry nothing for this request (left out so older tiers never see them)."""
+    empty: set[str] = set()
+    if not request.history:
+        empty.add("history")
+    if not request.web_results:
+        empty.add("web_results")
+    if not request.web_search:
+        empty.add("web_search")
+    return empty
 
 
 def needs_probe(request: AnalyzeRequest) -> bool:
-    return bool(request.history) or needs_new_contract(request)
+    return bool(request.history) or uses_web(request) or needs_new_contract(request)
 
 
 def probe_url(analyze_url: str, *, web: bool) -> str:

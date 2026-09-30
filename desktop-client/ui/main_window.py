@@ -10,6 +10,7 @@ The window owns no logic: it emits signals and the controller in ``main.py`` act
 
 from __future__ import annotations
 
+import html
 from typing import Final
 
 from core.config import ENGINE_CHOICES
@@ -81,7 +82,7 @@ def _button(text: str, name: str, style: str = _BUTTON, tooltip: str = "") -> QP
 class ExchangeWidget(QFrame):
     """One question and its answer."""
 
-    def __init__(self, question: str, result: ClientResult, parent: QWidget) -> None:
+    def __init__(self, question: str, result: ClientResult, parent: QWidget, searched: str = "") -> None:
         super().__init__(parent)
         response, metrics = result.response, result.metrics
         self.setStyleSheet(f"ExchangeWidget {{ background: {MANTLE}; border: 1px solid {SURFACE0}; border-radius: 10px; }}")
@@ -101,7 +102,21 @@ class ExchangeWidget(QFrame):
         actions = ActionWidget(self)
         actions.set_blocks([(block.language, block.code) for block in response.code_blocks])
         layout.addWidget(actions)
+        if response.sources:
+            lines = [f"Sources{f' (searched: {html.escape(searched)})' if searched else ''}"]
+            for number, source in enumerate(response.sources, start=1):
+                lines.append(
+                    f'[{number}] <a href="{html.escape(source.url, quote=True)}" style="color: {BLUE};">{html.escape(source.title)}</a>'
+                )
+            sources = QLabel("<br>".join(lines), self)
+            sources.setTextFormat(Qt.TextFormat.RichText)
+            sources.setOpenExternalLinks(True)
+            sources.setWordWrap(True)
+            sources.setStyleSheet(f"color: {SUBTEXT}; font-size: 9pt;")
+            layout.addWidget(sources)
         details = [f"{response.model_id} via {metrics.tier}", f"first token {metrics.server_ttft_ms / 1000:.1f}s"]
+        if response.sources:
+            details.append("web")
         if response.confidence is not None:
             details.append(f"confidence {response.confidence:.0%}")
         if response.finish_reason != "stop":
@@ -122,6 +137,8 @@ class MainWindow(QWidget):
     memory_toggled = pyqtSignal(bool)  # "Remember the conversation"
     speak_toggled = pyqtSignal(bool)  # "Speak answers"
     stop_speaking_clicked = pyqtSignal()
+    search_toggled = pyqtSignal(bool)  # "Search the web"
+    smart_toggled = pyqtSignal(bool)  # "Smart query"
 
     def __init__(self) -> None:
         super().__init__(None)
@@ -232,13 +249,27 @@ class MainWindow(QWidget):
         self.speak_check.setToolTip("Read the summary of each answer aloud with the Windows voice")
         self.speak_check.toggled.connect(self.speak_toggled)
         options.addWidget(self.speak_check)
+        self.search_check = QCheckBox("Search the web", self)
+        self.search_check.setAccessibleName("Search web")
+        self.search_check.setToolTip(
+            "Off by default. On: your typed question is sent as a search to Stack Overflow and Wikipedia "
+            "(free, no account) and the top results are quoted to the model. Your screen is never searched."
+        )
+        self.search_check.toggled.connect(self._search_changed)
+        options.addWidget(self.search_check)
+        self.smart_check = QCheckBox("Smart query", self)
+        self.smart_check.setAccessibleName("Smart query")
+        self.smart_check.setEnabled(False)
+        self.smart_check.setToolTip("Let the model rewrite your question into search keywords first (one extra short model call)")
+        self.smart_check.toggled.connect(self.smart_toggled)
+        options.addWidget(self.smart_check)
         options.addStretch(1)
         self.stop_speaking_button = _button("Stop voice", "Stop voice", tooltip="Stop reading the answer aloud (Esc does this too)")
         self.stop_speaking_button.clicked.connect(self.stop_speaking_clicked)
         self.stop_speaking_button.hide()
         options.addWidget(self.stop_speaking_button)
         root.addLayout(options)
-        for box in (self.screen_check, self.memory_check, self.speak_check):
+        for box in (self.screen_check, self.memory_check, self.speak_check, self.search_check, self.smart_check):
             box.setStyleSheet(f"QCheckBox {{ color: {TEXT}; spacing: 6px; }}")
 
         buttons = QHBoxLayout()
@@ -267,6 +298,21 @@ class MainWindow(QWidget):
             "Ask about your screen…  (Enter to send)" if on else "Message OmniSight (no screenshot is sent)…  (Enter to send)"
         )
         self.send_button.setToolTip("Capture the screen and ask this question" if on else "Send this message without the screen")
+
+    def _search_changed(self, on: bool) -> None:
+        self.smart_check.setEnabled(on)
+        self.search_toggled.emit(on)
+
+    def set_search_enabled(self, on: bool) -> None:
+        self._set_checked(self.search_check, on)
+        self.smart_check.setEnabled(on)
+
+    def set_smart_enabled(self, on: bool) -> None:
+        self._set_checked(self.smart_check, on)
+
+    def set_progress(self, text: str) -> None:
+        """A transient status line while the controller works on something other than the model."""
+        self.status.setText(text)
 
     def set_memory_enabled(self, on: bool) -> None:
         self._set_checked(self.memory_check, on)
@@ -350,10 +396,10 @@ class MainWindow(QWidget):
         if self.notice.isVisible() and self._state not in BUSY_STATES:
             self.notice.hide()
 
-    def add_exchange(self, question: str, result: ClientResult) -> None:
+    def add_exchange(self, question: str, result: ClientResult, searched: str = "") -> None:
         self.notice.hide()
         self.empty_label.hide()
-        widget = ExchangeWidget(question, result, self._content)
+        widget = ExchangeWidget(question, result, self._content, searched)
         self._list.insertWidget(self._list.count() - 1, widget)
         self._exchanges.append(widget)
         while len(self._exchanges) > MAX_EXCHANGES:
@@ -386,6 +432,7 @@ class MainWindow(QWidget):
         self.engine.setEnabled(not busy and not self._recording)
         self.clear_button.setEnabled(idle_for_input)
         self.screen_check.setEnabled(idle_for_input)
+        self.search_check.setEnabled(idle_for_input)
         if busy and not self.status.text():
             self.status.setText("Working…")
         color = {AppState.ERROR: RED, AppState.CAPTURING: BLUE, AppState.ANALYZING: BLUE, AppState.RECORDING_VOICE: PEACH}.get(

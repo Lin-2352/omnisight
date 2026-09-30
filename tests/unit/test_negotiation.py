@@ -269,3 +269,83 @@ def test_chat_with_every_tier_down_reports_the_failures(http_mock: Any, clock: M
     http_mock.get(WEB_STATUS, body=requests.ConnectionError("offline"))
     with pytest.raises(InferenceError, match="every inference endpoint failed"):
         make_client(clock).analyze(chat_request(HISTORY))
+
+
+# -- web search fields (contract 2.3.0) ---------------------------------------------------------------
+
+from network.negotiation import supports_web, uses_web  # noqa: E402
+from network.schemas import WebResult  # noqa: E402
+
+HITS = [WebResult(title="KeyError", url="https://stackoverflow.com/q/1", snippet="Use dict.get.")]
+
+
+def web_request(*, history: list[ChatTurn] | None = None, results: list[WebResult] | None = None, search: bool = False) -> Any:
+    image = ImagePayload.model_validate(small_jpeg_payload())
+    return build_request(image, mode=AnalysisMode.EXPLAIN, prompt="why?", history=history or [], web_results=results or [], web_search=search)
+
+
+@pytest.mark.parametrize(("version", "expected"), [("2.3.0", True), ("2.10.0", True), ("3.0.0", True), ("2.2.9", False), ("2.2.0", False), (None, False), ("x", False)])
+def test_supports_web(version: str | None, expected: bool) -> None:
+    assert supports_web(version) is expected
+
+
+def test_uses_web_and_needs_probe() -> None:
+    assert not uses_web(web_request()) and not needs_probe(web_request())
+    assert uses_web(web_request(results=HITS)) and needs_probe(web_request(results=HITS))
+    assert uses_web(web_request(search=True)) and needs_probe(web_request(search=True))
+
+
+def test_a_plain_request_never_carries_any_optional_key() -> None:
+    body = json.loads(request_body(web_request()) or b"")
+    for key in ("history", "web_results", "web_search"):
+        assert key not in body
+
+
+def test_web_fields_reach_a_2_3_0_tier_and_empty_ones_stay_out() -> None:
+    body = json.loads(request_body(web_request(results=HITS), tier_version="2.3.0", negotiated=True) or b"")
+    assert body["web_results"][0]["url"] == "https://stackoverflow.com/q/1" and "history" not in body and "web_search" not in body
+    grounded = json.loads(request_body(web_request(search=True), tier_version="2.3.0", negotiated=True) or b"")
+    assert grounded["web_search"] is True and "web_results" not in grounded
+
+
+def test_a_2_2_0_tier_keeps_history_but_never_sees_web_fields() -> None:
+    request = web_request(history=HISTORY, results=HITS, search=True)
+    body = json.loads(request_body(request, tier_version="2.2.0", negotiated=True) or b"")
+    assert len(body["history"]) == 2
+    assert "web_results" not in body and "web_search" not in body
+
+
+@pytest.mark.parametrize("version", ["2.1.0", None])
+def test_an_old_or_unknown_tier_gets_a_plain_screen_question(version: str | None) -> None:
+    body = json.loads(request_body(web_request(history=HISTORY, results=HITS, search=True), tier_version=version, negotiated=True) or b"")
+    for key in ("history", "web_results", "web_search"):
+        assert key not in body
+    assert body["prompt"] == "why?"
+
+
+def test_chat_with_web_results_is_refused_by_a_tier_below_2_2_0() -> None:
+    request = build_request(None, mode=AnalysisMode.CHAT, prompt="hi", web_results=HITS)
+    assert request_body(request, tier_version="2.1.0", negotiated=True) is None
+    body = json.loads(request_body(request, tier_version="2.2.0", negotiated=True) or b"")
+    assert "web_results" not in body and body["image"] is None
+
+
+def test_the_client_sends_results_to_a_2_3_0_node_and_strips_them_for_an_older_one(http_mock: Any, clock: ManualClock) -> None:
+    http_mock.get(GIST_URL, json=gist_body(endpoint_record()))
+    http_mock.get(NODE_HEALTH, json={"status": "ok", "contract_version": "2.3.0"})
+    sent: list[dict[str, Any]] = []
+    serve_answer(http_mock, KAGGLE_ANALYZE, sent)
+    make_client(clock).analyze(web_request(results=HITS))
+    assert sent[0]["web_results"][0]["title"] == "KeyError"
+    http_mock.replace(responses.GET, NODE_HEALTH, json={"status": "ok", "contract_version": "2.2.0"})
+    make_client(clock).analyze(web_request(results=HITS, search=True))
+    assert "web_results" not in sent[1] and "web_search" not in sent[1]
+
+
+def test_a_plain_question_is_not_probed_even_with_the_web_feature_present(http_mock: Any, clock: ManualClock) -> None:
+    http_mock.get(GIST_URL, json=gist_body(endpoint_record()))
+    sent: list[dict[str, Any]] = []
+    serve_answer(http_mock, KAGGLE_ANALYZE, sent)
+    make_client(clock).analyze(web_request())
+    assert not any(call.request.url == NODE_HEALTH for call in http_mock.calls)
+    assert set(sent[0]) == {"request_id", "mode", "image", "audio", "prompt", "max_new_tokens", "temperature", "client"}

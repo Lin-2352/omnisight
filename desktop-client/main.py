@@ -19,12 +19,14 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import dataclasses
 import os
 import signal
 import socket
 import sys
 import threading
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any, Final
 
 HERE = Path(__file__).resolve().parent
@@ -60,9 +62,10 @@ from core.foreground import POLL_INTERVAL_MS, ForegroundTracker  # noqa: E402
 from core.logger import configure_logging, default_log_dir, get_logger  # noqa: E402
 from core.memory import MODE_PHRASES, ConversationMemory  # noqa: E402
 from core.node_supervisor import NodeError, NodeState, NodeSupervisor, repo_root  # noqa: E402
+from core.search import SearchOutcome, WebSearch, smart_query  # noqa: E402
 from core.state import AppState, StateMachine  # noqa: E402
 from core.tts import Speaker  # noqa: E402
-from network.client import HealthCheckWorker, InferenceWorker, build_request  # noqa: E402
+from network.client import HealthCheckWorker, InferenceClient, InferenceWorker, build_request  # noqa: E402
 from network.schemas import (  # noqa: E402
     CONTRACT_VERSION,
     AnalysisMode,
@@ -73,6 +76,7 @@ from PyQt6.QtCore import (  # noqa: E402
     QObject,
     QRunnable,
     QSettings,
+    QThread,
     QThreadPool,
     QTimer,
     QUrl,
@@ -439,6 +443,31 @@ class SettingsDialog(QDialog):
 # ---------------------------------------------------------------------------
 
 
+class SearchWorker(QThread):
+    """Runs one web search (and the optional smart-query rewrite) off the GUI thread."""
+
+    done = pyqtSignal(int, object)  # token, SearchOutcome
+
+    def __init__(self, token: int, search: WebSearch, text: str, ask: Callable[[str], str] | None) -> None:
+        super().__init__()
+        self._token = token
+        self._search = search
+        self._text = text
+        self._ask = ask
+        self.setObjectName("omnisight-search")
+
+    def run(self) -> None:
+        text = self._text
+        try:
+            if self._ask is not None:
+                text = smart_query(self._ask, text) or text
+            outcome = self._search.search(text)
+        except Exception as exc:  # noqa: BLE001 - a search bug must never stop the answer
+            logger.exception("web search crashed")
+            outcome = SearchOutcome(query="", notice=f"Web search failed ({type(exc).__name__}). Answering without it.")
+        self.done.emit(self._token, outcome)
+
+
 class OmniSightController(QObject):
     def __init__(self, app: QApplication, settings: ClientSettings, enable_hotkeys: bool = True) -> None:
         super().__init__()
@@ -455,6 +484,15 @@ class OmniSightController(QObject):
         saved = QSettings()
         self.memory = ConversationMemory(enabled=saved.value("memory_enabled", True, type=bool))
         self.speaker = Speaker()
+        self.web_search = WebSearch()
+        self._search_enabled = bool(saved.value("web_search", False, type=bool))
+        self._smart_enabled = bool(saved.value("smart_query", False, type=bool)) and self._search_enabled
+        self._search_token = 0
+        self._search_pending = False
+        self._search_worker: SearchWorker | None = None
+        self._search_outcome: SearchOutcome | None = None
+        self._web_search_flag = False
+        self._held_capture: tuple[CaptureResult, RecordingResult | None] | None = None
         self._speak_enabled = bool(saved.value("speak_enabled", False, type=bool)) and self.speaker.available
         self._last_node_status: Any = None
         self._origin = "hud"  # who asked: "hud" (hotkeys) or "window"
@@ -482,10 +520,14 @@ class OmniSightController(QObject):
         self.window.memory_toggled.connect(self.set_memory_enabled)
         self.window.speak_toggled.connect(self.set_speak_enabled)
         self.window.stop_speaking_clicked.connect(self.stop_speaking)
+        self.window.search_toggled.connect(self.set_search_enabled)
+        self.window.smart_toggled.connect(self.set_smart_enabled)
         self.window.set_engine(self.settings.engine_choice)
         self.window.set_memory_enabled(self.memory.enabled)
         self.window.set_speak_available(self.speaker.available)
         self.window.set_speak_enabled(self._speak_enabled)
+        self.window.set_search_enabled(self._search_enabled)
+        self.window.set_smart_enabled(self._smart_enabled)
         self._speaking_timer = QTimer(self)
         self._speaking_timer.timeout.connect(lambda: self.window.set_speaking(self.speaker.speaking))
         self._speaking_timer.start(500)
@@ -579,6 +621,20 @@ class OmniSightController(QObject):
         self.memory.set_enabled(on)
         QSettings().setValue("memory_enabled", on)
         logger.info("conversation memory %s", "on" if on else "off (and cleared)")
+
+    def set_search_enabled(self, on: bool) -> None:
+        """Search the web for typed questions (Stack Overflow + Wikipedia, free and keyless); off by default."""
+        self._search_enabled = on
+        if not on:
+            self._smart_enabled = False
+            QSettings().setValue("smart_query", False)
+            self.window.set_smart_enabled(False)
+        QSettings().setValue("web_search", on)
+        logger.info("web search %s", "on" if on else "off")
+
+    def set_smart_enabled(self, on: bool) -> None:
+        self._smart_enabled = on and self._search_enabled
+        QSettings().setValue("smart_query", self._smart_enabled)
 
     def set_speak_enabled(self, on: bool) -> None:
         self._speak_enabled = on and self.speaker.available
@@ -690,6 +746,7 @@ class OmniSightController(QObject):
         self.stop_speaking()
         self._origin, self._pending_prompt, self._pending_question = "hud", "", ""
         self._pending_mode = AnalysisMode.DEBUG
+        self._start_search("")
         self.state.transition(AppState.CAPTURING, reason="Alt+C")
         self._start_capture(None)
 
@@ -708,19 +765,92 @@ class OmniSightController(QObject):
         self.stop_speaking()
         self._origin, self._pending_prompt, self._pending_question = "window", text, text
         self._pending_mode = AnalysisMode.CHAT
+        self.state.transition(AppState.ANALYZING, reason="chat")
+        self._start_search(text)
+        self._dispatch()
+
+    def _send_chat(self) -> None:
+        results, flag = self._web_fields()
         try:
             request = build_request(
                 None,
                 mode=AnalysisMode.CHAT,
-                prompt=text,
+                prompt=self._pending_prompt,
                 max_new_tokens=self.settings.max_new_tokens,
                 history=self.memory.history(),
+                web_results=results,
+                web_search=flag,
             )
         except ValueError as exc:
             self.state.fail(f"Could not build the request: {exc}")
             return
-        self.state.transition(AppState.ANALYZING, reason="chat")
         self._start_worker(request, LatencyMetrics())
+
+    # -- web search ------------------------------------------------------------------------------------
+
+    def _start_search(self, text: str, *, voice: bool = False) -> None:
+        """Search for the typed question while the screen is captured (or the user speaks).
+
+        Only the typed question is ever a query. A spoken question has no text yet, so the cloud tier is
+        asked to ground itself instead (``web_search``), and so is a question whose search found nothing.
+        """
+        self._search_token += 1
+        self._search_outcome = None
+        self._held_capture = None
+        self._web_search_flag = False
+        self._search_pending = False
+        if not self._search_enabled:
+            return
+        typed = text.strip()
+        if not typed:
+            self._web_search_flag = voice
+            return
+        self._search_pending = True
+        ask = self._ask_engine if self._smart_enabled else None
+        worker = SearchWorker(self._search_token, self.web_search, typed, ask)
+        worker.done.connect(self._on_search_done)
+        worker.finished.connect(lambda w=worker: self._retire_search(w))
+        self._search_worker = worker
+        self.window.set_progress("Searching the web…")
+        worker.start()
+
+    def _retire_search(self, worker: SearchWorker) -> None:
+        if self._search_worker is worker:
+            self._search_worker = None
+        worker.deleteLater()
+
+    def _ask_engine(self, prompt: str) -> str:
+        """One short chat call for the smart query. Never uses the web tier: the rewrite stays on Kaggle or this PC."""
+        client = InferenceClient(dataclasses.replace(self.settings, fallback_api_url=None), self.resolver)
+        request = build_request(None, mode=AnalysisMode.CHAT, prompt=prompt, max_new_tokens=32)
+        return client.analyze(request).response.markdown
+
+    def _on_search_done(self, token: int, outcome: SearchOutcome) -> None:
+        if token != self._search_token:
+            return  # a newer question started; this answer is stale
+        self._search_pending = False
+        self._search_outcome = outcome
+        if not outcome.results:
+            self._web_search_flag = True  # let the cloud tier ground itself if it ends up answering
+        if outcome.notice:
+            self.window.show_notice(outcome.notice)
+        self._dispatch()
+
+    def _web_fields(self) -> tuple[list[Any], bool]:
+        outcome = self._search_outcome
+        return (list(outcome.results) if outcome else []), self._web_search_flag
+
+    def _dispatch(self) -> None:
+        """Send the request once everything it needs (capture, search) is ready."""
+        if self._search_pending:
+            return
+        if self._pending_mode is AnalysisMode.CHAT:
+            if self.state.state is AppState.ANALYZING and self._worker is None:
+                self._send_chat()
+        elif self._held_capture is not None:
+            capture, recording = self._held_capture
+            self._held_capture = None
+            self._send_capture(capture, recording)
 
     def on_window_capture(self) -> None:
         self._begin_window_request(AnalysisMode.DEBUG, "")
@@ -732,6 +862,7 @@ class OmniSightController(QObject):
         self._origin, self._pending_prompt, self._pending_question = "window", prompt, prompt
         self._pending_mode = mode
         self.state.transition(AppState.CAPTURING, reason="window")
+        self._start_search(prompt)
         self._start_capture(None)
 
     def on_window_mic(self) -> None:
@@ -759,6 +890,7 @@ class OmniSightController(QObject):
             self.state.fail(str(exc))
             return
         self.state.transition(AppState.RECORDING_VOICE, reason="Alt+V down")
+        self._start_search(prompt, voice=True)
 
     # -- microphone permission ------------------------------------------------------
 
@@ -810,6 +942,13 @@ class OmniSightController(QObject):
     def _on_capture_finished(self, capture: CaptureResult, recording: RecordingResult | None) -> None:
         if self.state.state is not AppState.CAPTURING:
             return
+        self._held_capture = (capture, recording)
+        self._dispatch()  # waits here while the web search is still running
+
+    def _send_capture(self, capture: CaptureResult, recording: RecordingResult | None) -> None:
+        if self.state.state is not AppState.CAPTURING:
+            return
+        results, flag = self._web_fields()
         try:
             request = build_request(
                 capture.to_image_payload(),
@@ -819,6 +958,8 @@ class OmniSightController(QObject):
                 prompt=self._pending_prompt,
                 max_new_tokens=self.settings.max_new_tokens,
                 history=self.memory.history(),
+                web_results=results,
+                web_search=flag,
             )
         except ValueError as exc:
             self.state.fail(f"Could not build the request: {exc}")
@@ -850,7 +991,11 @@ class OmniSightController(QObject):
     def _on_inference_succeeded(self, payload: dict[str, Any]) -> None:
         result = ClientResult.model_validate(payload)
         self.state.add_result(result.response, result.metrics)
-        self.window.add_exchange(self._pending_question, result)
+        outcome = self._search_outcome
+        attached = bool(outcome and outcome.results)
+        self.window.add_exchange(self._pending_question, result, outcome.query if attached and result.response.sources else "")
+        if attached and not result.response.sources:
+            self.window.show_notice("This engine could not use the web results, so it answered without them.")
         question = self._pending_question or result.response.transcript or MODE_PHRASES[self._pending_mode]
         self.memory.add_exchange(question, result.response.markdown)
         if self._speak_enabled:
@@ -893,6 +1038,9 @@ class OmniSightController(QObject):
         self._node_timer.stop()
         self._speaking_timer.stop()
         self.speaker.stop()
+        self._search_token += 1  # a late search result must not touch a closing app
+        if self._search_worker is not None:
+            self._search_worker.wait(2000)
         self.node.shutdown()  # stops a node this app started; an adopted one is left alone
         self.hotkeys.stop()
         self.recorder.close()
