@@ -426,7 +426,7 @@ def _request_roundtrip() -> str:
     again = oc.AnalyzeRequest.model_validate_json(request.model_dump_json())
     expect(again == request, "JSON round-trip changed the request")
     expect(request.max_new_tokens == 512 and request.temperature == 0.1, "defaults changed")
-    expect(oc.CONTRACT_VERSION == "2.2.0", f"unexpected contract version {oc.CONTRACT_VERSION}")
+    expect(oc.CONTRACT_VERSION == "2.3.0", f"unexpected contract version {oc.CONTRACT_VERSION}")
     return f"request_id={str(request.request_id)[:8]}…"
 
 

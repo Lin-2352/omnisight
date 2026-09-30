@@ -37,7 +37,10 @@ from pydantic import (
 
 # 2.2.0 (additive): optional ``history`` (text-only earlier turns), ``chat`` mode, and ``image`` is
 # optional for ``chat``. Every 2.1.0 request is still valid; a 2.1.0 node rejects the new fields.
-CONTRACT_VERSION: Final[str] = "2.2.0"
+#
+# 2.3.0 (additive): optional ``web_results`` (search snippets the client fetched) and ``web_search``
+# (ask the cloud tier to ground its answer) on the request; ``sources`` on the response.
+CONTRACT_VERSION: Final[str] = "2.3.0"
 
 #: Decoded byte budget for a single screenshot (350 KiB).
 MAX_IMAGE_BYTES: Final[int] = 350 * 1024
@@ -50,6 +53,12 @@ MAX_PROMPT_CHARS: Final[int] = 4000
 MAX_HISTORY_TURNS: Final[int] = 12
 MAX_TURN_CHARS: Final[int] = 2000
 MAX_HISTORY_CHARS: Final[int] = 12_000
+#: Web search context: a few short quotations with their URLs, never whole pages.
+MAX_WEB_RESULTS: Final[int] = 5
+MAX_WEB_TITLE_CHARS: Final[int] = 200
+MAX_WEB_URL_CHARS: Final[int] = 500
+MAX_WEB_SNIPPET_CHARS: Final[int] = 600
+MAX_SOURCES: Final[int] = 8
 MAX_MARKDOWN_CHARS: Final[int] = 65_536
 MAX_SUMMARY_CHARS: Final[int] = 500
 MAX_CODE_BLOCKS: Final[int] = 50
@@ -302,6 +311,21 @@ class ChatTurn(_RequestModel):
     text: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=MAX_TURN_CHARS)]
 
 
+class WebResult(_RequestModel):
+    """One web search hit: a quotation with where it came from (never a whole page)."""
+
+    title: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=MAX_WEB_TITLE_CHARS)]
+    url: Annotated[str, StringConstraints(strip_whitespace=True, min_length=9, max_length=MAX_WEB_URL_CHARS)]
+    snippet: Annotated[str, StringConstraints(strip_whitespace=True, max_length=MAX_WEB_SNIPPET_CHARS)] = ""
+
+    @field_validator("url")
+    @classmethod
+    def _https_only(cls, value: str) -> str:
+        if not value.startswith("https://") or any(ch.isspace() or ord(ch) < 32 for ch in value):
+            raise ValueError("url must be an https:// URL without whitespace")
+        return value
+
+
 class AnalyzeRequest(_RequestModel):
     """Body of ``POST /v1/analyze``."""
 
@@ -315,6 +339,10 @@ class AnalyzeRequest(_RequestModel):
     prompt: Annotated[str, StringConstraints(strip_whitespace=True, max_length=MAX_PROMPT_CHARS)] = (
         ""
     )
+    #: Search hits the client fetched (its own query); quoted to the model as untrusted context.
+    web_results: list[WebResult] = Field(default_factory=list, max_length=MAX_WEB_RESULTS)
+    #: Ask a tier that has its own search (the Gemini web route) to ground the answer.
+    web_search: bool = Field(default=False, strict=True)
     max_new_tokens: int = Field(default=MAX_NEW_TOKENS, ge=16, le=MAX_NEW_TOKENS, strict=True)
     temperature: float = Field(
         default=DEFAULT_TEMPERATURE,
@@ -395,6 +423,8 @@ class AnalyzeResponse(_ResponseModel):
         ),
     )
     finish_reason: Literal["stop", "length", "timeout"] = "stop"
+    #: What the answer was grounded on (the request's ``web_results`` or the cloud tier's own search).
+    sources: list[WebResult] = Field(default_factory=list, max_length=MAX_SOURCES)
     timings: InferenceTimings
     created_utc: AwareDatetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 

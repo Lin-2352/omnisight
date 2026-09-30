@@ -1,7 +1,7 @@
 // The three answer engines behind /api/fallback-infer. Node runtime only.
 import { createHash } from "node:crypto";
 
-import { CONTRACT_VERSION, type AnalyzeRequest, type AnalyzeResponse } from "../contracts";
+import { CONTRACT_VERSION, type AnalyzeRequest, type AnalyzeResponse, type WebResult } from "../contracts";
 import { deriveSummary, extractCodeBlocks } from "../markdown";
 import { presetBySha256 } from "../presets";
 import { systemPromptFor, userText } from "./prompts";
@@ -39,6 +39,7 @@ function buildResponse(
   tokens: number,
   confidence: number | null,
   finishReason: AnalyzeResponse["finish_reason"] = "stop",
+  sources: WebResult[] = [],
 ): AnalyzeResponse {
   const blocks = extractCodeBlocks(markdown);
   const languages = blocks.map((block) => block.language).filter((language) => language !== "text");
@@ -55,6 +56,7 @@ function buildResponse(
     transcript: null,
     confidence,
     finish_reason: finishReason,
+    sources: sources.slice(0, 8),
     timings: {
       queue_ms: 0,
       // Non-streaming engines only know the total; first-token time is reported as the total.
@@ -92,7 +94,11 @@ export async function analyzeWithNode(baseUrl: string, request: AnalyzeRequest, 
 // --- Tier 2: Gemini (Google AI Studio) -------------------------------------------------------
 
 interface GeminiResponse {
-  candidates?: { content?: { parts?: { text?: string }[] }; finishReason?: string }[];
+  candidates?: {
+    content?: { parts?: { text?: string }[] };
+    finishReason?: string;
+    groundingMetadata?: { groundingChunks?: { web?: { uri?: string; title?: string } }[] };
+  }[];
   usageMetadata?: { candidatesTokenCount?: number };
 }
 
@@ -114,6 +120,22 @@ export function geminiGenerationConfig(model: string, request: AnalyzeRequest): 
     return { ...base, maxOutputTokens: answerTokens, thinkingConfig: { thinkingBudget: 0 } };
   }
   return { ...base, maxOutputTokens: answerTokens + THINKING_HEADROOM_TOKENS };
+}
+
+/** Sources Gemini's own search used (``groundingMetadata``): https links only, de-duplicated, capped. */
+export function groundingSources(candidate: NonNullable<GeminiResponse["candidates"]>[number] | undefined): WebResult[] {
+  const seen = new Set<string>();
+  const sources: WebResult[] = [];
+  for (const chunk of candidate?.groundingMetadata?.groundingChunks ?? []) {
+    const uri = chunk.web?.uri?.trim() ?? "";
+     
+    if (!uri.startsWith("https://") || uri.length > 500 || /[\s\x00-\x1f]/.test(uri) || seen.has(uri)) continue;
+    seen.add(uri);
+    const title = (chunk.web?.title ?? "").replace(/\s+/g, " ").trim().slice(0, 200) || new URL(uri).hostname;
+    sources.push({ title, url: uri, snippet: "" });
+    if (sources.length === 8) break;
+  }
+  return sources;
 }
 
 /**
@@ -142,7 +164,10 @@ export async function analyzeWithGemini(request: AnalyzeRequest, apiKey: string,
   const parts: Record<string, unknown>[] = [];
   if (request.image) parts.push({ inline_data: { mime_type: request.image.mime, data: request.image.data_b64 } });
   if (request.audio) parts.push({ inline_data: { mime_type: "audio/wav", data: request.audio.data_b64 } });
-  parts.push({ text: userText(request.mode ?? "explain", request.prompt ?? "") });
+  const webResults = request.web_results ?? [];
+  // Client-supplied results are the evidence; Gemini's own Google Search runs only when asked and none were given.
+  const ground = request.web_search === true && webResults.length === 0;
+  parts.push({ text: userText(request.mode ?? "explain", request.prompt ?? "", webResults) });
   const started = Date.now();
   const deadline = started + timeoutMs;
   let response: Response | undefined;
@@ -156,9 +181,10 @@ export async function analyzeWithGemini(request: AnalyzeRequest, apiKey: string,
         method: "POST",
         headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
         body: JSON.stringify({
-          systemInstruction: { parts: [{ text: systemPromptFor(Boolean(request.image)) }] },
+          systemInstruction: { parts: [{ text: systemPromptFor(Boolean(request.image), webResults.length > 0) }] },
           contents: [...historyContents(request), { role: "user", parts }],
           generationConfig: geminiGenerationConfig(model, request),
+          ...(ground ? { tools: [{ google_search: {} }] } : {}),
         }),
         signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())),
         cache: "no-store",
@@ -178,7 +204,8 @@ export async function analyzeWithGemini(request: AnalyzeRequest, apiKey: string,
   const text = (candidate?.content?.parts ?? []).map((part) => part.text ?? "").join("").trim();
   if (!text) throw new EngineUnavailable("gemini returned no text");
   const finish = candidate?.finishReason === "MAX_TOKENS" ? "length" : "stop";
-  return buildResponse(request, text, "gemini", model, Date.now() - started, payload.usageMetadata?.candidatesTokenCount ?? 0, null, finish);
+  const sources = ground ? groundingSources(candidate) : webResults;
+  return buildResponse(request, text, "gemini", model, Date.now() - started, payload.usageMetadata?.candidatesTokenCount ?? 0, null, finish, sources);
 }
 
 // --- Tier 3: deterministic --------------------------------------------------------------------

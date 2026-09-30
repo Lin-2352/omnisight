@@ -27,7 +27,7 @@ from PIL import Image
 from pydantic import ValidationError
 
 import omnisight_contracts as oc
-from tests.support import REPO_ROOT, endpoint_record, jpeg_b64, png_b64, render_terminal, wav_bytes
+from tests.support import REPO_ROOT, analyze_response_json, endpoint_record, jpeg_b64, png_b64, render_terminal, wav_bytes
 
 
 def image_payload(**overrides: object) -> dict[str, object]:
@@ -99,8 +99,8 @@ def turns(count: int, size: int = 1) -> list[dict[str, str]]:
     return [{"role": "assistant" if i % 2 else "user", "text": "y" * size} for i in range(count)]
 
 
-def test_contract_version_is_2_2_0() -> None:
-    assert oc.CONTRACT_VERSION == "2.2.0"
+def test_contract_version_is_2_3_0() -> None:
+    assert oc.CONTRACT_VERSION == "2.3.0"
 
 
 def test_history_defaults_to_empty_and_round_trips() -> None:
@@ -526,3 +526,87 @@ def test_base64_helpers() -> None:
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
     assert oc.sniff_image_mime(buffer.getvalue()) == "image/png"
+
+
+# ---------------------------------------------------------------------------
+# Contract 2.3.0: web search context and sources
+# ---------------------------------------------------------------------------
+
+
+def hit(**overrides: object) -> dict[str, object]:
+    body: dict[str, object] = {"title": "KeyError in Python", "url": "https://stackoverflow.com/q/1", "snippet": "Use dict.get."}
+    body.update(overrides)
+    return body
+
+
+def test_web_fields_default_to_off_and_empty() -> None:
+    req = request()
+    assert req.web_results == [] and req.web_search is False
+
+
+def test_web_results_round_trip_and_are_stripped() -> None:
+    req = request(web_results=[hit(title="  Title  ", snippet="  text \n")], web_search=True)
+    assert req.web_results[0].title == "Title" and req.web_results[0].snippet == "text"
+    assert req.web_search is True
+    assert oc.AnalyzeRequest.model_validate_json(req.model_dump_json()) == req
+
+
+@pytest.mark.parametrize("count", [0, 1, oc.MAX_WEB_RESULTS])
+def test_web_results_accept_up_to_the_limit(count: int) -> None:
+    assert len(request(web_results=[hit(url=f"https://example.com/{i}") for i in range(count)]).web_results) == count
+
+
+def test_web_results_reject_one_over_the_limit() -> None:
+    assert "web_results" in rejected(web_results=[hit() for _ in range(oc.MAX_WEB_RESULTS + 1)])
+
+
+@pytest.mark.parametrize(
+    ("field", "limit"),
+    [("title", oc.MAX_WEB_TITLE_CHARS), ("snippet", oc.MAX_WEB_SNIPPET_CHARS)],
+)
+def test_web_result_text_limits_at_the_edge(field: str, limit: int) -> None:
+    assert len(getattr(request(web_results=[hit(**{field: "x" * limit})]).web_results[0], field)) == limit
+    assert field in rejected(web_results=[hit(**{field: "x" * (limit + 1)})])
+
+
+def test_web_result_url_limit_at_the_edge() -> None:
+    prefix = "https://example.com/"
+    at_limit = prefix + "a" * (oc.MAX_WEB_URL_CHARS - len(prefix))
+    assert len(request(web_results=[hit(url=at_limit)]).web_results[0].url) == oc.MAX_WEB_URL_CHARS
+    assert "url" in rejected(web_results=[hit(url=at_limit + "a")])
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["http://example.com/a", "ftp://example.com/a", "javascript:alert(1)", "https://exa mple.com", "https://example.com/\nx", "//example.com/a", "example.com/abcdef", ""],
+)
+def test_web_result_urls_must_be_https_without_whitespace(url: str) -> None:
+    assert "url" in rejected(web_results=[hit(url=url)])
+
+
+@pytest.mark.parametrize("bad", [{"title": ""}, {"title": "   "}, {"extra": "x"}])
+def test_web_results_are_strict(bad: dict[str, object]) -> None:
+    assert "web_results" in rejected(web_results=[hit(**bad)])
+
+
+@pytest.mark.parametrize("value", [1, "true", None, 0.5])
+def test_web_search_must_be_a_real_boolean(value: object) -> None:
+    assert "web_search" in rejected(web_search=value)
+
+
+def test_response_sources_default_empty_round_trip_and_are_capped() -> None:
+    body = analyze_response_json()
+    assert oc.AnalyzeResponse.model_validate(body).sources == []
+    body["sources"] = [hit(url=f"https://example.com/{i}") for i in range(oc.MAX_SOURCES)]
+    assert len(oc.AnalyzeResponse.model_validate(body).sources) == oc.MAX_SOURCES
+    body["sources"] = [hit(url=f"https://example.com/{i}") for i in range(oc.MAX_SOURCES + 1)]
+    with pytest.raises(ValidationError):
+        oc.AnalyzeResponse.model_validate(body)
+
+
+def test_an_older_client_still_reads_a_response_that_has_sources() -> None:
+    """Responses are tolerant (extra ignored): a 2.2.0 client must not break on the new key."""
+    body = analyze_response_json()
+    body["sources"] = [hit()]
+    body["some_future_field"] = 1
+    assert oc.AnalyzeResponse.model_validate(body).markdown

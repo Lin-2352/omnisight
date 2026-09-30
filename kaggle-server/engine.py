@@ -496,7 +496,14 @@ class QwenVisionEngine:
 
     def _generate(self, request: AnalyzeRequest, image: Image.Image | None, transcript: str | None) -> GenerationOutcome:
         assert self._model is not None
-        messages = build_messages(request.mode, request.prompt, transcript, request.history, has_image=image is not None)
+        messages = build_messages(
+            request.mode,
+            request.prompt,
+            transcript,
+            request.history,
+            has_image=image is not None,
+            web_results=request.web_results,
+        )
         text = self._processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         # Chat turns carry no screenshot: no vision tokens, so they are fast and cheap on memory.
         images = [image] if image is not None else None
@@ -632,6 +639,7 @@ class QwenVisionEngine:
             transcript=transcript,
             confidence=outcome.confidence,
             finish_reason=outcome.finish_reason,  # type: ignore[arg-type]
+            sources=list(request.web_results),
             timings=InferenceTimings(
                 queue_ms=round(queue_ms, 2),
                 ttft_ms=round(ttft_ms, 2),

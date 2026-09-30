@@ -324,6 +324,7 @@ class FakeEngine:
                 transcript=transcript,
                 confidence=0.87,
                 finish_reason="stop",
+                sources=list(request.web_results),
                 timings=oc.InferenceTimings(
                     queue_ms=queue_ms + waited_ms,
                     ttft_ms=412.0,

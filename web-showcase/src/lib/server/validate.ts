@@ -3,7 +3,7 @@
 // Node runtime only (uses Buffer).
 import { randomUUID } from "node:crypto";
 
-import type { AnalysisMode, AnalyzeRequest, ChatTurn, ErrorCode, ErrorResponse } from "../contracts";
+import type { AnalysisMode, AnalyzeRequest, ChatTurn, ErrorCode, ErrorResponse, WebResult } from "../contracts";
 
 export const MAX_BODY_BYTES = 600 * 1024;
 export const MAX_IMAGE_BYTES = 350 * 1024;
@@ -13,10 +13,14 @@ export const MAX_NEW_TOKENS = 512;
 export const MAX_HISTORY_TURNS = 12;
 export const MAX_TURN_CHARS = 2000;
 export const MAX_HISTORY_CHARS = 12_000;
+export const MAX_WEB_RESULTS = 5;
+export const MAX_WEB_TITLE_CHARS = 200;
+export const MAX_WEB_URL_CHARS = 500;
+export const MAX_WEB_SNIPPET_CHARS = 600;
 
 const MODES: readonly AnalysisMode[] = ["explain", "debug", "summarize", "ocr", "voice_query", "chat"];
 const IMAGE_MIMES = ["image/jpeg", "image/png", "image/webp"] as const;
-const TOP_LEVEL_KEYS = new Set(["request_id", "mode", "image", "audio", "history", "prompt", "max_new_tokens", "temperature", "client"]);
+const TOP_LEVEL_KEYS = new Set(["request_id", "mode", "image", "audio", "history", "prompt", "web_results", "web_search", "max_new_tokens", "temperature", "client"]);
 const BASE64 = /^[A-Za-z0-9+/]+={0,2}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -126,6 +130,32 @@ function parseImage(value: unknown): { payload: NonNullable<AnalyzeRequest["imag
   };
 }
 
+/** Search hits the client fetched: short quotations with https URLs, capped like the Pydantic ``WebResult``. */
+function parseWebResults(value: unknown): WebResult[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) throw invalid("web_results: must be a list");
+  if (value.length > MAX_WEB_RESULTS) throw invalid(`web_results: at most ${MAX_WEB_RESULTS} results are allowed`);
+  return value.map((item, index): WebResult => {
+    if (!isRecord(item)) throw invalid(`web_results[${index}]: must be an object`);
+    for (const key of Object.keys(item)) {
+      if (key !== "title" && key !== "url" && key !== "snippet") throw invalid(`web_results[${index}].${key}: extra fields are not permitted`);
+    }
+    if (typeof item.title !== "string" || !item.title.trim() || item.title.trim().length > MAX_WEB_TITLE_CHARS) {
+      throw invalid(`web_results[${index}].title: must be 1 to ${MAX_WEB_TITLE_CHARS} characters`);
+    }
+    const url = typeof item.url === "string" ? item.url.trim() : "";
+     
+    if (url.length < 9 || url.length > MAX_WEB_URL_CHARS || !url.startsWith("https://") || /[\s\x00-\x1f]/.test(url)) {
+      throw invalid(`web_results[${index}].url: must be an https:// URL of at most ${MAX_WEB_URL_CHARS} characters without whitespace`);
+    }
+    const snippet = item.snippet === undefined ? "" : item.snippet;
+    if (typeof snippet !== "string" || snippet.trim().length > MAX_WEB_SNIPPET_CHARS) {
+      throw invalid(`web_results[${index}].snippet: must be at most ${MAX_WEB_SNIPPET_CHARS} characters`);
+    }
+    return { title: item.title.trim(), url, snippet: snippet.trim() };
+  });
+}
+
 /** Earlier turns for follow-up questions: text only, oldest first, capped by count, turn and total size. */
 function parseHistory(value: unknown): ChatTurn[] {
   if (value === undefined || value === null) return [];
@@ -180,6 +210,9 @@ export function validateAnalyzeBody(raw: string): ValidatedRequest {
     ({ payload: image, bytes: imageBytes } = parseImage(body.image));
   }
   const history = parseHistory(body.history);
+  const webResults = parseWebResults(body.web_results);
+  if (body.web_search !== undefined && typeof body.web_search !== "boolean") throw invalid("web_search: must be true or false");
+  const webSearch = body.web_search === true;
 
   let audio: AnalyzeRequest["audio"] = null;
   if (body.audio !== undefined && body.audio !== null) {
@@ -215,6 +248,8 @@ export function validateAnalyzeBody(raw: string): ValidatedRequest {
       image,
       audio,
       history,
+      web_results: webResults,
+      web_search: webSearch,
       prompt: prompt.trim(),
       max_new_tokens: maxNewTokens,
       temperature,

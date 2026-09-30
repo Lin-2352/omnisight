@@ -63,3 +63,13 @@ def test_system_prompt_does_not_prime_the_model_toward_on_screen_instructions() 
     from prompts import SYSTEM_PROMPT
 
     assert "addressed to an AI" not in SYSTEM_PROMPT
+
+
+def test_web_rule_and_block_markers_are_identical(ts_source: str) -> None:
+    from prompts import WEB_BLOCK_END, WEB_BLOCK_START, WEB_SYSTEM_RULE
+
+    rule = re.search(r'export const WEB_SYSTEM_RULE =\s*("(?:[^"\\]|\\.)*");', ts_source, flags=re.S)
+    assert rule is not None and json.loads(rule.group(1)) == WEB_SYSTEM_RULE
+    for name, expected in (("WEB_BLOCK_START", WEB_BLOCK_START), ("WEB_BLOCK_END", WEB_BLOCK_END)):
+        found = re.search(rf'export const {name} = ("(?:[^"\\]|\\.)*");', ts_source)
+        assert found is not None and json.loads(found.group(1)) == expected, name

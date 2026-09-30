@@ -33,16 +33,20 @@ function answer(response: AnalyzeResponse, tier: Tier, trace: string[]): NextRes
 }
 
 /**
- * What to send a Kaggle node. A node older than contract 2.2.0 rejects ``history`` and ``chat``, so
- * history is dropped for it (the question is still answered) and an image-less chat turn skips it.
+ * What to send a Kaggle node. Nodes forbid unknown fields, so a field a node does not know must be
+ * absent, not merely empty:
+ *   - below 2.3.0: ``web_results`` and ``web_search`` are dropped (the question is still answered);
+ *   - below 2.2.0: ``history`` is dropped too, and an image-less chat turn skips the node.
  */
 export function requestForNode(request: AnalyzeRequest, nodeContract: string | undefined): AnalyzeRequest | null {
-  if (versionAtLeast(nodeContract, "2.2.0")) return request;
+  if (versionAtLeast(nodeContract, "2.3.0")) return request;
+  const older = { ...request };
+  delete older.web_results;
+  delete older.web_search;
+  if (versionAtLeast(nodeContract, "2.2.0")) return older;
   if (request.mode === "chat" || !request.image) return null;
-  // A 2.1.0 node forbids unknown fields, so the key must be absent, not merely empty.
-  const withoutHistory = { ...request };
-  delete withoutHistory.history;
-  return withoutHistory;
+  delete older.history;
+  return older;
 }
 
 export async function POST(request: Request): Promise<NextResponse> {
