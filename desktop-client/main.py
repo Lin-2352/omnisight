@@ -58,8 +58,10 @@ from core.config import (  # noqa: E402
 )
 from core.foreground import POLL_INTERVAL_MS, ForegroundTracker  # noqa: E402
 from core.logger import configure_logging, default_log_dir, get_logger  # noqa: E402
+from core.memory import MODE_PHRASES, ConversationMemory  # noqa: E402
 from core.node_supervisor import NodeError, NodeState, NodeSupervisor, repo_root  # noqa: E402
 from core.state import AppState, StateMachine  # noqa: E402
+from core.tts import Speaker  # noqa: E402
 from network.client import HealthCheckWorker, InferenceWorker, build_request  # noqa: E402
 from network.schemas import (  # noqa: E402
     CONTRACT_VERSION,
@@ -450,6 +452,10 @@ class OmniSightController(QObject):
         self.window = MainWindow()
         self.foreground = ForegroundTracker()
         self.node = NodeSupervisor(repo_root(), settings.local_dev_url)
+        saved = QSettings()
+        self.memory = ConversationMemory(enabled=saved.value("memory_enabled", True, type=bool))
+        self.speaker = Speaker()
+        self._speak_enabled = bool(saved.value("speak_enabled", False, type=bool)) and self.speaker.available
         self._last_node_status: Any = None
         self._origin = "hud"  # who asked: "hud" (hotkeys) or "window"
         self._pending_prompt = ""
@@ -473,7 +479,16 @@ class OmniSightController(QObject):
         self.window.node_toggle_clicked.connect(self.toggle_node)
         self.window.clear_requested.connect(self.clear_history)
         self.window.settings_requested.connect(self.open_settings)
+        self.window.memory_toggled.connect(self.set_memory_enabled)
+        self.window.speak_toggled.connect(self.set_speak_enabled)
+        self.window.stop_speaking_clicked.connect(self.stop_speaking)
         self.window.set_engine(self.settings.engine_choice)
+        self.window.set_memory_enabled(self.memory.enabled)
+        self.window.set_speak_available(self.speaker.available)
+        self.window.set_speak_enabled(self._speak_enabled)
+        self._speaking_timer = QTimer(self)
+        self._speaking_timer.timeout.connect(lambda: self.window.set_speaking(self.speaker.speaking))
+        self._speaking_timer.start(500)
 
         self.tray = QSystemTrayIcon(make_tray_icon(), self)
         self.tray.setToolTip("OmniSight - Alt+C analyze, hold Alt+V to ask")
@@ -559,7 +574,24 @@ class OmniSightController(QObject):
         self.hud.place_on_screen(None)
         self.hud.fade_in()
 
+    def set_memory_enabled(self, on: bool) -> None:
+        """Remember the conversation (text only, on this PC) so follow-up questions make sense."""
+        self.memory.set_enabled(on)
+        QSettings().setValue("memory_enabled", on)
+        logger.info("conversation memory %s", "on" if on else "off (and cleared)")
+
+    def set_speak_enabled(self, on: bool) -> None:
+        self._speak_enabled = on and self.speaker.available
+        QSettings().setValue("speak_enabled", self._speak_enabled)
+        if not self._speak_enabled:
+            self.stop_speaking()
+
+    def stop_speaking(self) -> None:
+        self.speaker.stop()
+        self.window.set_speaking(False)
+
     def clear_history(self) -> None:
+        self.memory.clear()
         self.state.clear_history()
         self.window.clear_exchanges()
         if not self.state.is_busy:
@@ -655,6 +687,7 @@ class OmniSightController(QObject):
         if self.state.is_busy:
             logger.info("Alt+C ignored: %s", self.state.state.value)
             return
+        self.stop_speaking()
         self._origin, self._pending_prompt, self._pending_question = "hud", "", ""
         self._pending_mode = AnalysisMode.DEBUG
         self.state.transition(AppState.CAPTURING, reason="Alt+C")
@@ -663,7 +696,31 @@ class OmniSightController(QObject):
     # -- window actions (the same pipeline, started with the mouse) ------------------------------------------
 
     def on_window_ask(self, text: str) -> None:
-        self._begin_window_request(AnalysisMode.EXPLAIN, text)
+        if self.window.include_screen:
+            self._begin_window_request(AnalysisMode.EXPLAIN, text)
+        else:
+            self._begin_chat(text)
+
+    def _begin_chat(self, text: str) -> None:
+        """A typed message with no screenshot: nothing is captured and no image leaves this PC."""
+        if self.state.is_busy:
+            return
+        self.stop_speaking()
+        self._origin, self._pending_prompt, self._pending_question = "window", text, text
+        self._pending_mode = AnalysisMode.CHAT
+        try:
+            request = build_request(
+                None,
+                mode=AnalysisMode.CHAT,
+                prompt=text,
+                max_new_tokens=self.settings.max_new_tokens,
+                history=self.memory.history(),
+            )
+        except ValueError as exc:
+            self.state.fail(f"Could not build the request: {exc}")
+            return
+        self.state.transition(AppState.ANALYZING, reason="chat")
+        self._start_worker(request, LatencyMetrics())
 
     def on_window_capture(self) -> None:
         self._begin_window_request(AnalysisMode.DEBUG, "")
@@ -671,6 +728,7 @@ class OmniSightController(QObject):
     def _begin_window_request(self, mode: AnalysisMode, prompt: str) -> None:
         if self.state.is_busy:
             return
+        self.stop_speaking()
         self._origin, self._pending_prompt, self._pending_question = "window", prompt, prompt
         self._pending_mode = mode
         self.state.transition(AppState.CAPTURING, reason="window")
@@ -689,6 +747,7 @@ class OmniSightController(QObject):
         if self.state.is_busy:
             logger.info("Alt+V ignored: %s", self.state.state.value)
             return
+        self.stop_speaking()
         self._origin, self._pending_prompt, self._pending_question = origin, prompt, prompt
         try:
             self.recorder.start_recording()
@@ -736,6 +795,7 @@ class OmniSightController(QObject):
         self._start_capture(self.recorder)
 
     def on_dismiss(self) -> None:
+        self.stop_speaking()  # Esc always quiets the voice, even with the HUD closed
         if self.hud.isVisible() and not self.state.is_busy:
             self.hud.dismiss()
 
@@ -758,6 +818,7 @@ class OmniSightController(QObject):
                 audio_duration_ms=recording.duration_ms if recording else None,
                 prompt=self._pending_prompt,
                 max_new_tokens=self.settings.max_new_tokens,
+                history=self.memory.history(),
             )
         except ValueError as exc:
             self.state.fail(f"Could not build the request: {exc}")
@@ -770,6 +831,9 @@ class OmniSightController(QObject):
         if self._origin == "hud":
             self.hud.place_on_screen(capture.monitor_rect, capture.monitor_device)
         self.state.transition(AppState.ANALYZING, reason=f"{capture.scaled_res} {capture.payload_bytes // 1024} KB")
+        self._start_worker(request, metrics)
+
+    def _start_worker(self, request: Any, metrics: LatencyMetrics) -> None:
         worker = InferenceWorker(self.settings, self.resolver, request, metrics)
         worker.succeeded.connect(self._on_inference_succeeded)
         worker.failed.connect(self.state.fail)
@@ -787,6 +851,10 @@ class OmniSightController(QObject):
         result = ClientResult.model_validate(payload)
         self.state.add_result(result.response, result.metrics)
         self.window.add_exchange(self._pending_question, result)
+        question = self._pending_question or result.response.transcript or MODE_PHRASES[self._pending_mode]
+        self.memory.add_exchange(question, result.response.markdown)
+        if self._speak_enabled:
+            self.speaker.speak(result.response.summary)
         if self.state.transition(AppState.DISPLAYING, reason=result.metrics.tier or ""):
             if self._origin == "hud":
                 self.hud.show_result(result)
@@ -823,6 +891,8 @@ class OmniSightController(QObject):
         logger.info("shutting down")
         self._foreground_timer.stop()
         self._node_timer.stop()
+        self._speaking_timer.stop()
+        self.speaker.stop()
         self.node.shutdown()  # stops a node this app started; an adopted one is left alone
         self.hotkeys.stop()
         self.recorder.close()

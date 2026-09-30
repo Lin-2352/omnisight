@@ -74,6 +74,18 @@ def test_fail_from_idle_records_the_error_and_emits(machine: StateMachine) -> No
     assert seen == [(AppState.IDLE, AppState.ERROR)]
 
 
+@pytest.mark.parametrize("origin", [AppState.IDLE, AppState.DISPLAYING, AppState.ERROR])
+def test_chat_can_start_analysis_without_a_capture(machine: StateMachine, origin: AppState) -> None:
+    machine._state = origin
+    assert machine.transition(AppState.ANALYZING, reason="chat")
+    assert machine.is_busy
+
+
+def test_analysis_cannot_start_in_the_middle_of_a_recording(machine: StateMachine) -> None:
+    machine._state = AppState.RECORDING_VOICE
+    assert not machine.transition(AppState.ANALYZING)
+
+
 def test_fail_from_displaying_is_forced_through_idle(machine: StateMachine) -> None:
     machine._state = AppState.DISPLAYING
     assert AppState.ERROR not in ALLOWED_TRANSITIONS[AppState.DISPLAYING]

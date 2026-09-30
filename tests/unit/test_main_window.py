@@ -8,6 +8,7 @@ recorder and the QSettings store are replaced so nothing real starts and no regi
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -18,6 +19,7 @@ import main
 from capture import screen
 from capture.audio import RecordingResult
 from core.foreground import WindowInfo
+from core.memory import ConversationMemory
 from core.node_supervisor import NodeState, NodeStatus
 from core.state import AppState
 from network.schemas import AnalysisMode, AnalyzeResponse, ClientResult, LatencyMetrics
@@ -32,7 +34,7 @@ class MemorySettings:
 
     store: dict[str, Any] = {}
 
-    def value(self, key: str, default: Any = None) -> Any:
+    def value(self, key: str, default: Any = None, type: Any = None) -> Any:  # noqa: A002 - Qt API
         return self.store.get(key, default)
 
     def setValue(self, key: str, value: Any) -> None:  # noqa: N802 - Qt API
@@ -96,6 +98,22 @@ class FakeNode:
         self.calls.append(("shutdown",))
 
 
+class FakeSpeaker:
+    """Stands in for the Windows voice: records what would be spoken."""
+
+    available = True
+    spoken: list[str] = []
+    stops = 0
+    speaking = False
+
+    def speak(self, text: str) -> bool:
+        FakeSpeaker.spoken.append(text)
+        return True
+
+    def stop(self) -> None:
+        FakeSpeaker.stops += 1
+
+
 class FakeRecorder:
     def __init__(self) -> None:
         self.recording = False
@@ -115,12 +133,13 @@ class FakeRecorder:
 
 
 @pytest.fixture
-def make_controller(qapp: Any, monkeypatch: pytest.MonkeyPatch):
+def make_controller(qapp: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     controllers: list[Any] = []
 
     def build(frames: list[Image.Image] | None = None, *, backend: str = "auto") -> tuple[Any, FakeMss]:
         MemorySettings.store = {}
         FakeWorker.instances = []
+        FakeSpeaker.spoken, FakeSpeaker.stops = [], 0
         fake = FakeMss(frames or [render_terminal(1280, 720)])
         monkeypatch.setattr(screen, "BLACK_FRAME_RETRY_DELAY_S", 0.0)
         real_capturer = screen.ScreenCapturer
@@ -134,6 +153,10 @@ def make_controller(qapp: Any, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(main, "QSettings", MemorySettings)
         monkeypatch.setattr(main, "InferenceWorker", FakeWorker)
         monkeypatch.setattr(main, "NodeSupervisor", FakeNode)
+        monkeypatch.setattr(main, "Speaker", FakeSpeaker)
+        monkeypatch.setattr(
+            main, "ConversationMemory", lambda enabled=True: ConversationMemory(tmp_path / "history.json", enabled=enabled)
+        )
         monkeypatch.setattr(main, "AudioRecorder", FakeRecorder)
         monkeypatch.setattr(main, "probe", lambda: None)
         monkeypatch.setattr(main, "describe", lambda capability: "test pc")
@@ -420,3 +443,141 @@ def test_settings_dialog_lists_every_engine(qapp: Any, make_controller: Any) -> 
     dialog.backend.setCurrentIndex(dialog.backend.findData("local_gpu"))
     dialog.apply()
     assert controller.settings.engine_choice == "local_gpu"
+
+
+# ---------------------------------------------------------------------------
+# Memory, chat and spoken answers
+# ---------------------------------------------------------------------------
+
+
+def ask(controller: Any, qapp: Any, text: str, answers: int) -> None:
+    controller.window.ask_box.setText(text)
+    controller.window.send_button.click()
+    assert wait_until(lambda: controller.window.exchange_count == answers, TIMEOUT_S, pump(qapp))
+    assert wait_until(lambda: controller.state.state is AppState.IDLE, TIMEOUT_S, pump(qapp))
+
+
+def test_a_follow_up_carries_the_earlier_exchange_as_history(qapp: Any, make_controller: Any) -> None:
+    controller, _ = make_controller()
+    ask(controller, qapp, "why does this crash?", 1)
+    assert FakeWorker.instances[0].request.history == []
+    ask(controller, qapp, "and how do I fix it?", 2)
+    history = FakeWorker.instances[1].request.history
+    assert [(turn.role, turn.text) for turn in history[:1]] == [("user", "why does this crash?")]
+    assert history[1].role == "assistant" and history[1].text
+
+
+def test_turning_memory_off_stops_sending_and_forgets(qapp: Any, make_controller: Any) -> None:
+    controller, _ = make_controller()
+    ask(controller, qapp, "first", 1)
+    controller.window.memory_check.setChecked(False)
+    assert not controller.memory.enabled and MemorySettings.store["memory_enabled"] is False
+    ask(controller, qapp, "second", 2)
+    assert FakeWorker.instances[1].request.history == []
+    assert len(controller.memory) == 0
+    controller.window.memory_check.setChecked(True)
+    ask(controller, qapp, "third", 3)
+    ask(controller, qapp, "fourth", 4)
+    assert [t.text for t in FakeWorker.instances[3].request.history][:1] == ["third"]
+
+
+def test_clear_also_forgets_the_conversation(qapp: Any, make_controller: Any, tmp_path: Path) -> None:
+    controller, _ = make_controller()
+    ask(controller, qapp, "remember me", 1)
+    assert (tmp_path / "history.json").exists()
+    controller.window.clear_button.click()
+    assert len(controller.memory) == 0 and not (tmp_path / "history.json").exists()
+    ask(controller, qapp, "next", 1)
+    assert FakeWorker.instances[-1].request.history == []
+
+
+def test_hotkey_questions_are_remembered_too(qapp: Any, make_controller: Any) -> None:
+    controller, _ = make_controller()
+    controller.on_capture_requested()
+    assert wait_until(lambda: len(controller.memory) == 2, TIMEOUT_S, pump(qapp))
+    assert controller.memory.history()[0].text == "Find the problem on my screen."
+
+
+def test_chat_without_the_screen_captures_nothing_and_sends_no_image(qapp: Any, make_controller: Any) -> None:
+    controller, fake = make_controller()
+    assert wait_until(lambda: not controller.pool.activeThreadCount(), TIMEOUT_S, pump(qapp))  # warm-up done
+    grabs = fake.grabs
+    controller.window.screen_check.setChecked(False)
+    assert "no screenshot" in controller.window.ask_box.placeholderText()
+    ask(controller, qapp, "what is a generator?", 1)
+    request = FakeWorker.instances[0].request
+    assert request.mode is AnalysisMode.CHAT and request.image is None and request.prompt == "what is a generator?"
+    assert fake.grabs == grabs
+    ask(controller, qapp, "show an example", 2)
+    assert FakeWorker.instances[1].request.history[0].text == "what is a generator?"
+    controller.window.screen_check.setChecked(True)
+    assert "your screen" in controller.window.ask_box.placeholderText()
+    ask(controller, qapp, "and this screen?", 3)
+    assert FakeWorker.instances[2].request.image is not None  # memory is shared with screen questions
+
+
+def test_chat_is_ignored_while_busy_and_a_bad_request_becomes_an_error(qapp: Any, make_controller: Any) -> None:
+    controller, _ = make_controller()
+    controller.window.screen_check.setChecked(False)
+    controller.state.transition(AppState.CAPTURING)
+    controller._begin_chat("hello")
+    assert not FakeWorker.instances
+    controller.state.transition(AppState.IDLE)
+    controller._begin_chat("x" * 4001)  # over the contract's prompt limit
+    assert "Could not build the request" in (controller.state.last_error or "")
+    assert not FakeWorker.instances
+
+
+def test_answers_are_spoken_only_when_the_switch_is_on(qapp: Any, make_controller: Any) -> None:
+    controller, _ = make_controller()
+    ask(controller, qapp, "quiet", 1)
+    assert FakeSpeaker.spoken == []
+    controller.window.speak_check.setChecked(True)
+    assert MemorySettings.store["speak_enabled"] is True
+    ask(controller, qapp, "loud", 2)
+    assert len(FakeSpeaker.spoken) == 1 and FakeSpeaker.spoken[0] == controller.state.latest().response.summary
+    stops = FakeSpeaker.stops
+    controller.window.speak_check.setChecked(False)
+    assert FakeSpeaker.stops > stops  # turning it off cuts the voice off
+
+
+def test_a_new_question_or_escape_stops_the_voice(qapp: Any, make_controller: Any) -> None:
+    controller, _ = make_controller()
+    base = FakeSpeaker.stops
+    controller.on_window_capture()
+    assert FakeSpeaker.stops > base
+    assert wait_until(lambda: controller.state.state is AppState.IDLE, TIMEOUT_S, pump(qapp))
+    base = FakeSpeaker.stops
+    controller.on_dismiss()
+    assert FakeSpeaker.stops == base + 1
+    controller.window.stop_speaking_button.click()
+    assert FakeSpeaker.stops == base + 2
+
+
+def test_window_options_can_be_set_without_echoing_and_the_stop_button_follows_the_voice(qapp: Any) -> None:
+    window = MainWindow()
+    window.set_memory_enabled(False)
+    window.set_speak_enabled(True)
+    assert not window.memory_check.isChecked() and window.speak_check.isChecked()
+    window.set_speaking(True)
+    assert not window.stop_speaking_button.isHidden()
+    window.set_speaking(False)
+    assert window.stop_speaking_button.isHidden()
+    window.set_speak_available(False)
+    assert not window.speak_check.isEnabled()
+    toggled: list[bool] = []
+    window.memory_toggled.connect(toggled.append)
+    window.set_memory_enabled(True)  # programmatic changes do not echo back as user toggles
+    assert toggled == []
+    window.memory_check.setChecked(False)
+    assert toggled == [False]
+
+
+def test_the_new_controls_have_accessible_names_and_lock_while_busy(qapp: Any) -> None:
+    window = MainWindow()
+    boxes = (window.screen_check, window.memory_check, window.speak_check, window.stop_speaking_button)
+    assert {w.accessibleName() for w in boxes} == {"Include screen", "Remember", "Speak", "Stop voice"}
+    window.set_app_state(AppState.ANALYZING)
+    assert not window.screen_check.isEnabled()
+    window.set_app_state(AppState.IDLE)
+    assert window.screen_check.isEnabled()

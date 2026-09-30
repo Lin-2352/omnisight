@@ -20,6 +20,7 @@ from network.schemas import ClientResult
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QCloseEvent, QShowEvent
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFrame,
     QHBoxLayout,
@@ -118,6 +119,9 @@ class MainWindow(QWidget):
     node_toggle_clicked = pyqtSignal()
     clear_requested = pyqtSignal()
     settings_requested = pyqtSignal()
+    memory_toggled = pyqtSignal(bool)  # "Remember the conversation"
+    speak_toggled = pyqtSignal(bool)  # "Speak answers"
+    stop_speaking_clicked = pyqtSignal()
 
     def __init__(self) -> None:
         super().__init__(None)
@@ -210,6 +214,33 @@ class MainWindow(QWidget):
         ask_row.addWidget(self.send_button)
         root.addLayout(ask_row)
 
+        options = QHBoxLayout()
+        self.screen_check = QCheckBox("Include my screen", self)
+        self.screen_check.setAccessibleName("Include screen")
+        self.screen_check.setChecked(True)
+        self.screen_check.setToolTip("Off: just chat, nothing is captured and no image is sent")
+        self.screen_check.toggled.connect(self._screen_toggled)
+        options.addWidget(self.screen_check)
+        self.memory_check = QCheckBox("Remember the conversation", self)
+        self.memory_check.setAccessibleName("Remember")
+        self.memory_check.setChecked(True)
+        self.memory_check.setToolTip("Keeps the last few questions and answers (text only) so follow-ups make sense")
+        self.memory_check.toggled.connect(self.memory_toggled)
+        options.addWidget(self.memory_check)
+        self.speak_check = QCheckBox("Speak answers", self)
+        self.speak_check.setAccessibleName("Speak")
+        self.speak_check.setToolTip("Read the summary of each answer aloud with the Windows voice")
+        self.speak_check.toggled.connect(self.speak_toggled)
+        options.addWidget(self.speak_check)
+        options.addStretch(1)
+        self.stop_speaking_button = _button("Stop voice", "Stop voice", tooltip="Stop reading the answer aloud (Esc does this too)")
+        self.stop_speaking_button.clicked.connect(self.stop_speaking_clicked)
+        self.stop_speaking_button.hide()
+        options.addWidget(self.stop_speaking_button)
+        root.addLayout(options)
+        for box in (self.screen_check, self.memory_check, self.speak_check):
+            box.setStyleSheet(f"QCheckBox {{ color: {TEXT}; spacing: 6px; }}")
+
         buttons = QHBoxLayout()
         self.capture_button = _button("Capture screen", "Capture", tooltip="Explain what is on the screen (same as Alt+C)")
         self.capture_button.clicked.connect(self.capture_requested)
@@ -226,6 +257,36 @@ class MainWindow(QWidget):
         self._refresh_controls()
 
     # -- outgoing actions ------------------------------------------------------------
+
+    @property
+    def include_screen(self) -> bool:
+        return self.screen_check.isChecked()
+
+    def _screen_toggled(self, on: bool) -> None:
+        self.ask_box.setPlaceholderText(
+            "Ask about your screen…  (Enter to send)" if on else "Message OmniSight (no screenshot is sent)…  (Enter to send)"
+        )
+        self.send_button.setToolTip("Capture the screen and ask this question" if on else "Send this message without the screen")
+
+    def set_memory_enabled(self, on: bool) -> None:
+        self._set_checked(self.memory_check, on)
+
+    def set_speak_enabled(self, on: bool) -> None:
+        self._set_checked(self.speak_check, on)
+
+    def set_speak_available(self, available: bool) -> None:
+        self.speak_check.setEnabled(available)
+        if not available:
+            self.speak_check.setToolTip("Spoken answers need Windows PowerShell and the built-in voice")
+
+    def set_speaking(self, speaking: bool) -> None:
+        self.stop_speaking_button.setVisible(speaking)
+
+    @staticmethod
+    def _set_checked(box: QCheckBox, on: bool) -> None:
+        box.blockSignals(True)
+        box.setChecked(on)
+        box.blockSignals(False)
 
     def _send(self) -> None:
         text = self.ask_box.text().strip()
@@ -324,6 +385,7 @@ class MainWindow(QWidget):
         self.mic_button.setStyleSheet(_RECORDING if self._recording else _BUTTON)
         self.engine.setEnabled(not busy and not self._recording)
         self.clear_button.setEnabled(idle_for_input)
+        self.screen_check.setEnabled(idle_for_input)
         if busy and not self.status.text():
             self.status.setText("Working…")
         color = {AppState.ERROR: RED, AppState.CAPTURING: BLUE, AppState.ANALYZING: BLUE, AppState.RECORDING_VOICE: PEACH}.get(

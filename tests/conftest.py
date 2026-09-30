@@ -45,6 +45,8 @@ CLIENT_TEST_FILES = (
     "unit/test_audio_recorder.py",
     "unit/test_state_and_config.py",
     "unit/test_node_supervisor.py",
+    "unit/test_negotiation.py",
+    "unit/test_memory_tts.py",
     "unit/test_main_window.py",
     "integration/test_dynamic_discovery.py",
     "integration/test_failover_circuit.py",

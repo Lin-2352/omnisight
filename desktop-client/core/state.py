@@ -35,12 +35,13 @@ class AppState(str, Enum):
 
 
 ALLOWED_TRANSITIONS: Final[dict[AppState, frozenset[AppState]]] = {
-    AppState.IDLE: frozenset({AppState.CAPTURING, AppState.RECORDING_VOICE, AppState.ERROR}),
+    # ANALYZING is reachable without a capture for chat, which sends no screenshot.
+    AppState.IDLE: frozenset({AppState.CAPTURING, AppState.RECORDING_VOICE, AppState.ANALYZING, AppState.ERROR}),
     AppState.RECORDING_VOICE: frozenset({AppState.CAPTURING, AppState.IDLE, AppState.ERROR}),
     AppState.CAPTURING: frozenset({AppState.ANALYZING, AppState.IDLE, AppState.ERROR}),
     AppState.ANALYZING: frozenset({AppState.DISPLAYING, AppState.ERROR, AppState.IDLE}),
-    AppState.DISPLAYING: frozenset({AppState.IDLE, AppState.CAPTURING, AppState.RECORDING_VOICE}),
-    AppState.ERROR: frozenset({AppState.IDLE, AppState.CAPTURING, AppState.RECORDING_VOICE}),
+    AppState.DISPLAYING: frozenset({AppState.IDLE, AppState.CAPTURING, AppState.RECORDING_VOICE, AppState.ANALYZING}),
+    AppState.ERROR: frozenset({AppState.IDLE, AppState.CAPTURING, AppState.RECORDING_VOICE, AppState.ANALYZING}),
 }
 
 BUSY_STATES: Final[frozenset[AppState]] = frozenset(
