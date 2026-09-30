@@ -25,7 +25,7 @@ from core.search import SearchOutcome
 from core.node_supervisor import NodeState, NodeStatus
 from core.state import AppState
 from network.schemas import AnalysisMode, AnalyzeResponse, ClientResult, LatencyMetrics, WebResult
-from tests.support import FakeMss, analyze_response_json, render_terminal, wait_until, wav_bytes
+from tests.support import FakeMss, ManualClock, analyze_response_json, render_terminal, wait_until, wav_bytes
 from ui.main_window import MAX_EXCHANGES, MainWindow
 
 TIMEOUT_S = 10.0
@@ -50,18 +50,37 @@ class FakeWorker(QObject):
     finished = pyqtSignal()
     instances: list[FakeWorker] = []
     echo_sources = True
+    reply: str | None = None  # markdown to answer with (default: the fake node's text)
+    fail_with: str | None = None
+    hold = False  # do not answer until release() is called
 
     def __init__(self, settings: Any, resolver: Any, request: Any, base_metrics: Any = None) -> None:
         super().__init__()
         self.request = request
+        self.settings = settings
+        self.cancelled = False
         FakeWorker.instances.append(self)
 
     def start(self) -> None:
-        QTimer.singleShot(0, self._run)
+        if not FakeWorker.hold:
+            QTimer.singleShot(0, self._run)
+
+    def release(self, reply: str | None = None) -> None:
+        if reply is not None:
+            FakeWorker.reply = reply
+        self._run()
 
     def _run(self) -> None:
+        if FakeWorker.fail_with:
+            self.failed.emit(FakeWorker.fail_with)
+            self.finished.emit()
+            return
         self.tier_changed.emit("local")
         body = analyze_response_json(str(self.request.request_id), source="kaggle", model_id="fake/engine")
+        if FakeWorker.reply is not None:
+            body["markdown"] = FakeWorker.reply
+            body["summary"] = FakeWorker.reply[:400]
+            body["code_blocks"] = []
         if FakeWorker.echo_sources:  # like the real node: the results it was given are its sources
             body["sources"] = [r.model_dump() for r in self.request.web_results]
         response = AnalyzeResponse.model_validate(body)
@@ -70,7 +89,7 @@ class FakeWorker(QObject):
         self.finished.emit()
 
     def cancel(self) -> None:
-        pass
+        self.cancelled = True
 
     def wait(self, timeout_ms: int = 0) -> bool:
         return True
@@ -166,6 +185,7 @@ def make_controller(qapp: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         FakeSpeaker.spoken, FakeSpeaker.stops = [], 0
         FakeSearch.queries, FakeSearch.gate, FakeSearch.outcome = [], None, None
         FakeWorker.echo_sources = True
+        FakeWorker.reply, FakeWorker.fail_with, FakeWorker.hold = None, None, False
         fake = FakeMss(frames or [render_terminal(1280, 720)])
         monkeypatch.setattr(screen, "BLACK_FRAME_RETRY_DELAY_S", 0.0)
         real_capturer = screen.ScreenCapturer
@@ -856,3 +876,321 @@ def test_source_links_are_escaped_so_a_hostile_title_cannot_inject_markup(qapp: 
     text = next(t for t in labels(window._exchanges[0]) if t.startswith("Sources"))
     assert "<img" not in text and "&lt;img" in text and "a &lt;b&gt;query&lt;/b&gt;" in text
     assert 'href="https://example.com/a?x=1&amp;y=&quot;2&quot;"' in text
+
+
+# ---------------------------------------------------------------------------
+# Watch mode
+# ---------------------------------------------------------------------------
+
+
+class Tray:
+    """Records tray notifications instead of showing them."""
+
+    def __init__(self) -> None:
+        self.messages: list[tuple[str, str]] = []
+
+    def __call__(self, title: str, message: str, *args: Any) -> None:
+        self.messages.append((title, message))
+
+
+def error_screen() -> Image.Image:
+    from PIL import ImageDraw
+
+    from tests.support import monospace_font
+
+    image = render_terminal(1280, 720)
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((40, 480, 1240, 700), fill=(130, 20, 20))
+    for i in range(6):
+        draw.text((60, 495 + i * 30), "Traceback (most recent call last): KeyError: 'discount_rate'", font=monospace_font(18), fill=(255, 255, 255))
+    return image
+
+
+def show(fake: Any, image: Image.Image) -> None:
+    """The next grab returns ``image`` (the start-up warm-up already used the first scripted frame)."""
+    from tests.support import FakeShot
+
+    fake._shots = [FakeShot(image)]
+    fake.grabs = 0
+
+
+@pytest.fixture
+def watching(qapp: Any, make_controller: Any, monkeypatch: pytest.MonkeyPatch):
+    """A controller on a local engine with a hand-driven clock and a recording tray."""
+
+    def build(backend: str = "local") -> tuple[Any, Any, ManualClock, Tray]:
+        controller, fake = make_controller(backend=backend)
+        clock = ManualClock()
+        controller.watch._clock = clock
+        tray = Tray()
+        monkeypatch.setattr(controller.tray, "showMessage", tray)
+        wait_until(lambda: not controller.pool.activeThreadCount(), TIMEOUT_S, pump(qapp))  # warm-up grab done
+        return controller, fake, clock, tray
+
+    return build
+
+
+def tick(controller: Any, qapp: Any, clock: ManualClock, workers: int | None = None) -> None:
+    """Advance past the interval, run one tick and wait until it has finished."""
+    clock.advance(11.0)
+    controller._watch_tick()
+    assert wait_until(lambda: controller.watch.in_flight is False or workers is not None, TIMEOUT_S, pump(qapp)) or True
+    wait_until(lambda: not controller.pool.activeThreadCount(), TIMEOUT_S, pump(qapp))
+    for _ in range(50):
+        qapp.processEvents()
+        if not controller.watch.in_flight:
+            break
+        wait_until(lambda: False, 0.05, pump(qapp))
+
+
+def test_watching_is_off_at_start_up_and_nothing_happens_on_its_own(qapp: Any, watching: Any) -> None:
+    controller, fake, clock, tray = watching()
+    assert not controller.watch.running and not controller.window.watch_check.isChecked()
+    grabs = fake.grabs
+    for _ in range(3):
+        clock.advance(60.0)
+        controller._watch_tick()
+    assert fake.grabs == grabs and not FakeWorker.instances and tray.messages == []
+    assert not controller.window.watch_label.isVisible() and not controller._watch_action.isEnabled()
+
+
+@pytest.mark.parametrize("backend", ["auto", "kaggle"])
+def test_watching_is_refused_on_an_engine_that_is_not_local(qapp: Any, watching: Any, backend: str) -> None:
+    controller, fake, clock, _ = watching(backend)
+    controller.window.watch_check.setChecked(True)
+    assert not controller.watch.running and not controller.window.watch_check.isChecked()
+    assert "local engine" in controller.window.notice.text() and "never leaves this PC" in controller.window.notice.text()
+    clock.advance(60.0)
+    controller._watch_tick()
+    assert not FakeWorker.instances
+
+
+def test_a_changed_screen_is_sent_to_the_local_node_only_with_the_fixed_question(qapp: Any, watching: Any) -> None:
+    from core.watch import WATCH_PROMPT
+
+    controller, fake, clock, tray = watching()
+    FakeWorker.reply = "NONE"
+    controller.window.watch_check.setChecked(True)
+    assert controller.watch.running and "Watching every 10 s" in controller.window.watch_label.text()
+    assert "frames stay on this PC" in controller.window.watch_label.text() and not controller.watch.paused
+    tick(controller, qapp, clock)
+    (worker,) = FakeWorker.instances
+    request = worker.request
+    assert request.mode is AnalysisMode.EXPLAIN and request.prompt == WATCH_PROMPT and request.image is not None
+    assert request.history == [] and request.web_results == [] and request.web_search is False
+    assert worker.settings.backend == "local" and worker.settings.fallback_api_url is None
+    assert controller.state.state is AppState.IDLE  # a background check does not look like the user's own request
+    assert tray.messages == [] and controller.window.exchange_count == 0
+
+
+def test_the_worker_is_forced_local_even_if_the_window_says_auto(qapp: Any, watching: Any) -> None:
+    controller, fake, clock, _ = watching()
+    FakeWorker.reply = "NONE"
+    controller.window.watch_check.setChecked(True)
+    controller.settings = controller.settings.with_backend("auto")  # a race: the engine changed, watching not stopped yet
+    tick(controller, qapp, clock)
+    assert FakeWorker.instances and FakeWorker.instances[0].settings.backend == "local"
+    assert FakeWorker.instances[0].settings.fallback_api_url is None
+
+
+def test_an_unchanged_screen_costs_no_model_call(qapp: Any, watching: Any) -> None:
+    controller, fake, clock, _ = watching()
+    FakeWorker.reply = "NONE"
+    screen = render_terminal(1280, 720)
+    show(fake, screen)
+    controller.window.watch_check.setChecked(True)
+    tick(controller, qapp, clock)
+    assert len(FakeWorker.instances) == 1
+    for _ in range(4):
+        show(fake, screen)
+        tick(controller, qapp, clock)
+    assert len(FakeWorker.instances) == 1  # four more looks, no more model calls
+
+
+def test_an_error_is_reported_once_in_the_tray_and_the_window_and_not_stored(qapp: Any, watching: Any) -> None:
+    controller, fake, clock, tray = watching()
+    FakeWorker.reply = "A KeyError for 'discount_rate' is shown in a traceback."
+    controller.window.watch_check.setChecked(True)
+    show(fake, error_screen())
+    tick(controller, qapp, clock)
+    assert tray.messages == [("OmniSight noticed something", "A KeyError for 'discount_rate' is shown in a traceback.")]
+    assert controller.window.exchange_count == 1
+    assert any("Noticed while watching" in text for text in labels(controller.window._exchanges[0]))
+    # the same error still on screen after a change elsewhere: not reported again
+    other = error_screen()
+    other.putpixel((5, 5), (255, 0, 0))
+    show(fake, render_terminal(1280, 720, font_px=22))
+    tick(controller, qapp, clock)
+    assert len(tray.messages) == 1
+    # private by construction: no conversation memory, no answer history, no speech
+    assert len(controller.memory) == 0 and controller.state.latest() is None and FakeSpeaker.spoken == []
+
+
+def test_a_cleared_screen_rearms_the_same_finding(qapp: Any, watching: Any) -> None:
+    controller, fake, clock, tray = watching()
+    controller.window.watch_check.setChecked(True)
+    for reply, screen in (("Build failed", error_screen()), ("NONE", render_terminal(1280, 720)), ("Build failed", error_screen())):
+        FakeWorker.reply = reply
+        show(fake, screen)
+        tick(controller, qapp, clock)
+    assert [m[1] for m in tray.messages] == ["Build failed", "Build failed"]
+
+
+def test_clicking_the_tray_message_opens_the_window(qapp: Any, watching: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    controller, fake, clock, tray = watching()
+    opened: list[bool] = []
+    monkeypatch.setattr(controller, "open_window", lambda: opened.append(True))
+    FakeWorker.reply = "Build failed"
+    controller.window.watch_check.setChecked(True)
+    show(fake, error_screen())
+    tick(controller, qapp, clock)
+    controller._on_tray_message_clicked()
+    assert opened == [True] and controller._watch_notice_pending is False
+
+
+def test_pause_and_resume_from_the_window_and_the_tray(qapp: Any, watching: Any) -> None:
+    controller, fake, clock, _ = watching()
+    FakeWorker.reply = "NONE"
+    controller.window.watch_check.setChecked(True)
+    assert controller._watch_action.isEnabled() and controller._watch_action.text() == "Pause watching"
+    assert "WATCHING" in controller.tray.toolTip()
+    controller.window.watch_pause_button.click()
+    assert controller.watch.paused and controller.window.watch_label.text() == "Paused"
+    assert controller.window.watch_pause_button.text() == "Resume watching" and "PAUSED" in controller.tray.toolTip()
+    assert controller._watch_action.text() == "Resume watching"
+    grabs = fake.grabs
+    clock.advance(120.0)
+    controller._watch_tick()
+    assert fake.grabs == grabs  # paused: no capture at all
+    controller._watch_action.trigger()
+    assert not controller.watch.paused and "Watching every" in controller.window.watch_label.text()
+
+
+def test_turning_watching_off_stops_everything(qapp: Any, watching: Any) -> None:
+    controller, fake, clock, _ = watching()
+    controller.window.watch_check.setChecked(True)
+    controller.window.watch_check.setChecked(False)
+    assert not controller.watch.running and not controller.window.watch_label.isVisible()
+    assert not controller.window.watch_pause_button.isVisible() and not controller._watch_action.isEnabled()
+    assert "WATCHING" not in controller.tray.toolTip()
+
+
+def test_switching_to_a_non_local_engine_stops_watching(qapp: Any, watching: Any) -> None:
+    controller, fake, clock, _ = watching()
+    controller.window.watch_check.setChecked(True)
+    controller.set_engine("kaggle")
+    assert not controller.watch.running and not controller.window.watch_check.isChecked()
+    assert "only runs on a local engine" in controller.window.notice.text()
+    controller.window.watch_check.setChecked(True)
+    controller.set_engine("local_cpu")  # another local engine keeps watching possible
+    assert not controller.window.watch_check.isChecked() or controller.watch.running
+
+
+def test_switching_between_local_engines_keeps_watching(qapp: Any, watching: Any) -> None:
+    controller, fake, clock, _ = watching()
+    controller.window.watch_check.setChecked(True)
+    controller.set_engine("local_gpu")
+    assert controller.watch.running
+    controller.set_backend("auto")
+    assert not controller.watch.running
+
+
+def test_the_app_being_busy_defers_the_tick(qapp: Any, watching: Any) -> None:
+    controller, fake, clock, _ = watching()
+    FakeWorker.reply = "NONE"
+    controller.window.watch_check.setChecked(True)
+    controller.state.transition(AppState.CAPTURING)
+    grabs = fake.grabs
+    clock.advance(60.0)
+    controller._watch_tick()
+    assert fake.grabs == grabs and not FakeWorker.instances
+    controller.state.transition(AppState.IDLE)
+    controller._watch_tick()
+    assert wait_until(lambda: fake.grabs > grabs, TIMEOUT_S, pump(qapp))
+
+
+def test_a_user_question_cancels_a_watch_request_that_is_still_running(qapp: Any, watching: Any) -> None:
+    controller, fake, clock, _ = watching()
+    FakeWorker.hold = True
+    controller.window.watch_check.setChecked(True)
+    clock.advance(11.0)
+    controller._watch_tick()
+    assert wait_until(lambda: len(FakeWorker.instances) == 1, TIMEOUT_S, pump(qapp))
+    watch_worker = FakeWorker.instances[0]
+    assert controller.watch.in_flight
+    FakeWorker.hold = False
+    controller.on_window_capture()  # the user asks something
+    assert watch_worker.cancelled
+    watch_worker.finished.emit()  # the cancelled worker ends without an answer
+    assert wait_until(lambda: not controller.watch.in_flight, TIMEOUT_S, pump(qapp))
+    assert wait_until(lambda: controller.window.exchange_count == 1, TIMEOUT_S, pump(qapp))  # the user's answer arrived
+
+
+def test_a_watch_answer_that_arrives_after_stopping_is_ignored(qapp: Any, watching: Any) -> None:
+    controller, fake, clock, tray = watching()
+    FakeWorker.hold = True
+    controller.window.watch_check.setChecked(True)
+    clock.advance(11.0)
+    controller._watch_tick()
+    assert wait_until(lambda: len(FakeWorker.instances) == 1, TIMEOUT_S, pump(qapp))
+    controller.window.watch_check.setChecked(False)
+    FakeWorker.instances[0].release("Build failed")
+    qapp.processEvents()
+    assert tray.messages == [] and controller.window.exchange_count == 0
+
+
+def test_repeated_node_failures_back_off_and_then_stop_watching(qapp: Any, watching: Any) -> None:
+    controller, fake, clock, _ = watching()
+    FakeWorker.fail_with = "every inference endpoint failed"
+    controller.window.watch_check.setChecked(True)
+    for expected in (20.0, 40.0):
+        tick(controller, qapp, clock)
+        assert controller.watch.running and controller.watch.current_interval_s == expected
+        show(fake, render_terminal(1280, 720, font_px=int(expected)))  # a new frame each time
+        clock.advance(expected)
+    tick(controller, qapp, clock)
+    assert not controller.watch.running and not controller.window.watch_check.isChecked()
+    assert "local node is not answering" in controller.window.notice.text()
+
+
+def test_a_black_or_failed_capture_is_skipped_without_counting_as_a_failure(qapp: Any, watching: Any) -> None:
+    from PIL import Image as PILImage
+
+    controller, fake, clock, _ = watching()
+    controller.window.watch_check.setChecked(True)
+    show(fake, PILImage.new("RGB", (1280, 720), (0, 0, 0)))  # a blank display
+    tick(controller, qapp, clock)
+    assert controller.watch.running and controller.watch.failures == 0 and not FakeWorker.instances
+
+
+def test_an_undecodable_frame_counts_as_a_failure_not_a_crash(qapp: Any, watching: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    controller, fake, clock, _ = watching()
+    controller.window.watch_check.setChecked(True)
+    monkeypatch.setattr(main, "frame_signature", lambda b64: (_ for _ in ()).throw(ValueError("corrupt")))
+    tick(controller, qapp, clock)
+    assert controller.watch.failures == 1 and controller.watch.running and not FakeWorker.instances
+
+
+def test_shutdown_stops_watching(qapp: Any, watching: Any) -> None:
+    controller, fake, clock, _ = watching()
+    controller.window.watch_check.setChecked(True)
+    controller.shutdown()
+    assert not controller.watch.running and not controller._watch_timer.isActive()
+
+
+def test_the_watch_controls_have_accessible_names(qapp: Any) -> None:
+    window = MainWindow()
+    assert window.watch_check.accessibleName() == "Watch screen"
+    assert "THIS PC" in window.watch_check.toolTip() and "Nothing leaves this PC" in window.watch_check.toolTip()
+    window.set_watch_status("Watching every 10 s", paused=False)
+    assert window.watch_pause_button.accessibleName() == "Pause watching" and not window.watch_pause_button.isHidden()
+    window.set_watch_status("Paused", paused=True)
+    assert window.watch_pause_button.accessibleName() == "Resume watching"
+    window.set_watch_status("")
+    assert window.watch_pause_button.isHidden() and window.watch_label.isHidden()
+    toggles: list[bool] = []
+    window.watch_toggled.connect(toggles.append)
+    window.set_watch_enabled(True)  # programmatic: no echo
+    assert toggles == [] and window.watch_check.isChecked()
+    window.watch_check.setChecked(False)
+    assert toggles == [False]

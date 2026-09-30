@@ -65,6 +65,15 @@ from core.node_supervisor import NodeError, NodeState, NodeSupervisor, repo_root
 from core.search import SearchOutcome, WebSearch, smart_query  # noqa: E402
 from core.state import AppState, StateMachine  # noqa: E402
 from core.tts import Speaker  # noqa: E402
+from core.watch import (  # noqa: E402
+    DEFAULT_INTERVAL_S,
+    WATCH_PROMPT,
+    FindingTracker,
+    WatchScheduler,
+    frame_changed,
+    frame_signature,
+    parse_watch_reply,
+)
 from network.client import HealthCheckWorker, InferenceClient, InferenceWorker, build_request  # noqa: E402
 from network.schemas import (  # noqa: E402
     CONTRACT_VERSION,
@@ -487,6 +496,12 @@ class OmniSightController(QObject):
         self.web_search = WebSearch()
         self._search_enabled = bool(saved.value("web_search", False, type=bool))
         self._smart_enabled = bool(saved.value("smart_query", False, type=bool)) and self._search_enabled
+        self.watch = WatchScheduler(_watch_interval())
+        self._watch_tracker = FindingTracker()
+        self._watch_signature: bytes | None = None  # the last frame the model looked at
+        self._watch_pending_signature: bytes | None = None
+        self._watch_worker: InferenceWorker | None = None
+        self._watch_notice_pending = False
         self._search_token = 0
         self._chat_sent = -1  # the search token whose chat request has already gone out
         self._search_pending = False
@@ -522,6 +537,8 @@ class OmniSightController(QObject):
         self.window.speak_toggled.connect(self.set_speak_enabled)
         self.window.stop_speaking_clicked.connect(self.stop_speaking)
         self.window.search_toggled.connect(self.set_search_enabled)
+        self.window.watch_toggled.connect(self.set_watch_enabled)
+        self.window.watch_pause_clicked.connect(self.toggle_watch_pause)
         self.window.smart_toggled.connect(self.set_smart_enabled)
         self.window.set_engine(self.settings.engine_choice)
         self.window.set_memory_enabled(self.memory.enabled)
@@ -529,6 +546,9 @@ class OmniSightController(QObject):
         self.window.set_speak_enabled(self._speak_enabled)
         self.window.set_search_enabled(self._search_enabled)
         self.window.set_smart_enabled(self._smart_enabled)
+        self._watch_timer = QTimer(self)
+        self._watch_timer.timeout.connect(self._watch_tick)
+        self._watch_timer.start(1000)
         self._speaking_timer = QTimer(self)
         self._speaking_timer.timeout.connect(lambda: self.window.set_speaking(self.speaker.speaking))
         self._speaking_timer.start(500)
@@ -545,6 +565,10 @@ class OmniSightController(QObject):
             action = QAction(label, menu)
             action.triggered.connect(slot)
             menu.addAction(action)
+        self._watch_action = QAction("Pause watching", menu)
+        self._watch_action.setEnabled(False)
+        self._watch_action.triggered.connect(self.toggle_watch_pause)
+        menu.addAction(self._watch_action)
         backend_menu = menu.addMenu("Backend")
         self._backend_group = QActionGroup(backend_menu)
         self._backend_group.setExclusive(True)
@@ -675,6 +699,7 @@ class OmniSightController(QObject):
         if action is not None and not action.isChecked():
             action.setChecked(True)
         logger.info("backend set to %s", self.settings.backend)
+        self._stop_watching_if_not_local()
         self.window.set_engine(self.settings.engine_choice)
         self._last_node_status = None
         self._refresh_node()
@@ -693,6 +718,7 @@ class OmniSightController(QObject):
         if action is not None and not action.isChecked():
             action.setChecked(True)
         self.window.set_engine(key)
+        self._stop_watching_if_not_local()
         logger.info("engine set to %s (%s)", key, ENGINE_CHOICES[key][0])
         status = self.node.status
         if (
@@ -745,6 +771,7 @@ class OmniSightController(QObject):
             logger.info("Alt+C ignored: %s", self.state.state.value)
             return
         self.stop_speaking()
+        self._cancel_watch_request()
         self._origin, self._pending_prompt, self._pending_question = "hud", "", ""
         self._pending_mode = AnalysisMode.DEBUG
         self._start_search("")
@@ -764,6 +791,7 @@ class OmniSightController(QObject):
         if self.state.is_busy:
             return
         self.stop_speaking()
+        self._cancel_watch_request()
         self._origin, self._pending_prompt, self._pending_question = "window", text, text
         self._pending_mode = AnalysisMode.CHAT
         self.state.transition(AppState.ANALYZING, reason="chat")
@@ -786,6 +814,153 @@ class OmniSightController(QObject):
             self.state.fail(f"Could not build the request: {exc}")
             return
         self._start_worker(request, LatencyMetrics())
+
+    # -- watch mode (local engine only) -----------------------------------------------------------------
+
+    def set_watch_enabled(self, on: bool) -> None:
+        """Start or stop watching the screen. Always off at start-up; only ever on a local engine."""
+        if not on:
+            self._stop_watching()
+            return
+        if self.settings.backend != "local":
+            self.window.set_watch_enabled(False)
+            self.window.show_notice(
+                "Watching needs a local engine, so your screen never leaves this PC. Pick Local GPU, Local CPU or Local auto first."
+            )
+            return
+        self._watch_signature = None
+        self._watch_tracker.reset()
+        self.watch.start()
+        self._update_watch_ui()
+        logger.info("watch mode on (every %.0f s, local engine only)", self.watch.interval_s)
+
+    def toggle_watch_pause(self) -> None:
+        if not self.watch.running:
+            return
+        if self.watch.paused:
+            self.watch.resume()
+        else:
+            self.watch.pause()
+        self._update_watch_ui()
+
+    def _update_watch_ui(self) -> None:
+        if not self.watch.running:
+            self.window.set_watch_status("")
+            self._watch_action.setEnabled(False)
+            self._watch_action.setText("Pause watching")
+            self.tray.setToolTip("OmniSight - Alt+C analyze, hold Alt+V to ask")
+            return
+        if self.watch.paused:
+            text, tip = "Paused", "OmniSight - watching is PAUSED"
+        else:
+            text, tip = (
+                f"Watching every {self.watch.interval_s:.0f} s - frames stay on this PC",
+                "OmniSight - WATCHING your screen (local engine)",
+            )
+        self.window.set_watch_status(text, paused=self.watch.paused)
+        self._watch_action.setEnabled(True)
+        self._watch_action.setText("Resume watching" if self.watch.paused else "Pause watching")
+        self.tray.setToolTip(tip)
+
+    def _stop_watching(self, notice: str = "") -> None:
+        self._cancel_watch_request()
+        self.watch.stop()
+        self._watch_signature = None
+        self._watch_tracker.reset()
+        self.window.set_watch_enabled(False)
+        self._update_watch_ui()
+        if notice:
+            self.window.show_notice(notice)
+            logger.info("watch mode stopped: %s", notice)
+
+    def _stop_watching_if_not_local(self) -> None:
+        if self.watch.running and self.settings.backend != "local":
+            self._stop_watching("Watching stopped: it only runs on a local engine, so your screen stays on this PC.")
+
+    def _cancel_watch_request(self) -> None:
+        """A question from the user wins: drop a watch request that is still waiting for the model."""
+        worker = self._watch_worker
+        if worker is not None:
+            worker.cancel()
+
+    def _watch_tick(self) -> None:
+        if not self.watch.running:
+            return
+        last = self.foreground.last_external
+        busy = self.state.is_busy or self._worker is not None
+        if not self.watch.due(busy=busy, window=last.hwnd if last is not None else None):
+            return
+        self.watch.begin()
+        task = CaptureTask(self.capturer, None, self.foreground.capture_point())
+        task.signals.finished.connect(self._on_watch_captured)
+        task.signals.failed.connect(self._on_watch_capture_failed)
+        self.pool.start(task)
+
+    def _on_watch_capture_failed(self, message: str) -> None:
+        # A black screen, a locked display or a grab error: skip this tick, do not count it against the node.
+        logger.debug("watch capture skipped: %s", message)
+        self.watch.finish(True)
+
+    def _on_watch_captured(self, capture: CaptureResult, recording: RecordingResult | None) -> None:
+        if not self.watch.running or self.watch.paused:
+            self.watch.finish(True)
+            return
+        if self.state.is_busy or self._worker is not None:
+            self.watch.finish(True)  # the user started something while this frame was being taken
+            return
+        try:
+            signature = frame_signature(capture.image_b64)
+        except Exception:  # noqa: BLE001 - an undecodable frame is skipped, never fatal
+            logger.exception("watch: could not fingerprint the frame")
+            self._on_watch_failed("could not read the frame")
+            return
+        if not frame_changed(self._watch_signature, signature):
+            self.watch.finish(True)  # the screen is the same: no model call
+            return
+        self._watch_pending_signature = signature
+        try:
+            request = build_request(capture.to_image_payload(), mode=AnalysisMode.EXPLAIN, prompt=WATCH_PROMPT, max_new_tokens=48)
+        except ValueError as exc:
+            self._on_watch_failed(f"could not build the request: {exc}")
+            return
+        # Forced local, whatever the window says: a race must never send a frame to Kaggle or the web tier.
+        local_only = dataclasses.replace(self.settings, backend="local", fallback_api_url=None)
+        worker = InferenceWorker(local_only, self.resolver, request, LatencyMetrics())
+        worker.succeeded.connect(self._on_watch_answer)
+        worker.failed.connect(self._on_watch_failed)
+        worker.finished.connect(lambda w=worker: self._retire_watch(w))
+        self._watch_worker = worker
+        worker.start()
+
+    def _on_watch_answer(self, payload: dict[str, Any]) -> None:
+        if not self.watch.running:
+            return
+        result = ClientResult.model_validate(payload)
+        self._watch_signature = self._watch_pending_signature
+        self.watch.finish(True)
+        news = self._watch_tracker.report(parse_watch_reply(result.response.markdown))
+        if news:
+            self._notify_finding(news, result)
+
+    def _on_watch_failed(self, message: str) -> None:
+        if not self.watch.running:
+            return
+        logger.info("watch tick failed: %s", message)
+        if self.watch.finish(False):
+            self._stop_watching("Watching stopped: the local node is not answering. Start it from the window, then turn watching on again.")
+
+    def _retire_watch(self, worker: InferenceWorker) -> None:
+        if self._watch_worker is worker:
+            self._watch_worker = None
+            if self.watch.in_flight:  # cancelled in favour of the user: the tick ends without a verdict
+                self.watch.finish(True)
+        worker.deleteLater()
+
+    def _notify_finding(self, finding: str, result: ClientResult) -> None:
+        logger.info("watch: noticed something (%d characters)", len(finding))
+        self._watch_notice_pending = True
+        self.tray.showMessage("OmniSight noticed something", finding, QSystemTrayIcon.MessageIcon.Warning, 10000)
+        self.window.add_exchange("Noticed while watching", result)
 
     # -- web search ------------------------------------------------------------------------------------
 
@@ -865,6 +1040,7 @@ class OmniSightController(QObject):
         if self.state.is_busy:
             return
         self.stop_speaking()
+        self._cancel_watch_request()
         self._origin, self._pending_prompt, self._pending_question = "window", prompt, prompt
         self._pending_mode = mode
         self.state.transition(AppState.CAPTURING, reason="window")
@@ -885,6 +1061,7 @@ class OmniSightController(QObject):
             logger.info("Alt+V ignored: %s", self.state.state.value)
             return
         self.stop_speaking()
+        self._cancel_watch_request()
         self._origin, self._pending_prompt, self._pending_question = origin, prompt, prompt
         try:
             self.recorder.start_recording()
@@ -921,7 +1098,10 @@ class OmniSightController(QObject):
         self.hud.status_label.setText("Microphone access is on. Hold Alt+V and speak.")
 
     def _on_tray_message_clicked(self) -> None:
-        if self._mic_notice_pending:
+        if self._watch_notice_pending:
+            self._watch_notice_pending = False
+            self.open_window()
+        elif self._mic_notice_pending:
             self._mic_notice_pending = False
             self.open_microphone_settings()
 
@@ -1043,6 +1223,12 @@ class OmniSightController(QObject):
         self._foreground_timer.stop()
         self._node_timer.stop()
         self._speaking_timer.stop()
+        self._watch_timer.stop()
+        self._stop_watching()
+        watcher = self._watch_worker
+        if watcher is not None and not watcher.wait(2000):
+            watcher.terminate()
+            watcher.wait(500)
         self.speaker.stop()
         self._search_token += 1  # a late search result must not touch a closing app
         worker = self._search_worker
@@ -1061,6 +1247,14 @@ class OmniSightController(QObject):
         self.tray.hide()
         self.hud.hide()
         self.window.hide()
+
+
+def _watch_interval() -> float:
+    """Seconds between watch ticks (``OMNISIGHT_WATCH_INTERVAL_S``, at least 5; the default is 10)."""
+    try:
+        return float(os.environ.get("OMNISIGHT_WATCH_INTERVAL_S", DEFAULT_INTERVAL_S))
+    except ValueError:
+        return DEFAULT_INTERVAL_S
 
 
 WINDOW_MESSAGES: Final[dict[AppState, str]] = {

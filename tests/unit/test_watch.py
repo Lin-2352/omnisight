@@ -1,0 +1,300 @@
+"""Watch-mode logic (``core.watch``): change detection, scheduling, reply parsing. No Qt, no sleeping."""
+
+from __future__ import annotations
+
+import base64
+import io
+from typing import Any
+
+import pytest
+from PIL import Image, ImageDraw
+
+from core.watch import (
+    DEFAULT_INTERVAL_S,
+    MAX_BACKOFF_S,
+    MAX_FAILURES,
+    MAX_FINDING_CHARS,
+    MIN_GAP_S,
+    MIN_INTERVAL_S,
+    SIGNATURE_SIZE,
+    WATCH_PROMPT,
+    FindingTracker,
+    WatchScheduler,
+    frame_changed,
+    frame_signature,
+    parse_watch_reply,
+)
+from tests.support import ManualClock, monospace_font, render_terminal
+
+# -- frames ---------------------------------------------------------------------------------------------
+
+
+def b64(image: Image.Image, quality: int = 75) -> str:
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG", quality=quality)
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+@pytest.fixture(scope="module")
+def base() -> Image.Image:
+    return render_terminal(1280, 720)
+
+
+def sig(image: Image.Image, quality: int = 75) -> bytes:
+    return frame_signature(b64(image, quality))
+
+
+def test_the_signature_is_a_small_fixed_size_fingerprint(base: Image.Image) -> None:
+    fingerprint = sig(base)
+    assert len(fingerprint) == SIGNATURE_SIZE[0] * SIGNATURE_SIZE[1]
+    assert sig(base) == fingerprint  # deterministic
+
+
+def test_an_identical_frame_is_not_a_change_even_after_another_jpeg_encode(base: Image.Image) -> None:
+    assert not frame_changed(sig(base, 75), sig(base, 75))
+    assert not frame_changed(sig(base, 75), sig(base, 40))  # compression noise is not a change
+
+
+def test_the_first_frame_and_a_size_mismatch_always_count_as_changed(base: Image.Image) -> None:
+    assert frame_changed(None, sig(base))
+    assert frame_changed(b"\x00" * 10, sig(base))
+
+
+def test_a_blinking_cursor_and_a_ticking_clock_do_not_trigger_a_model_call(base: Image.Image) -> None:
+    cursor = base.copy()
+    ImageDraw.Draw(cursor).rectangle((300, 400, 310, 420), fill=(255, 255, 255))
+    clock = base.copy()
+    ImageDraw.Draw(clock).text((1180, 10), "12:34:56", font=monospace_font(14), fill=(255, 255, 255))
+    assert not frame_changed(sig(base), sig(cursor))
+    assert not frame_changed(sig(base), sig(clock))
+
+
+def test_a_new_block_of_text_such_as_an_error_is_a_change(base: Image.Image) -> None:
+    errored = base.copy()
+    draw = ImageDraw.Draw(errored)
+    draw.rectangle((40, 500, 1240, 700), fill=(120, 20, 20))
+    for i in range(6):
+        draw.text((60, 515 + i * 28), "Traceback (most recent call last): KeyError: 'discount_rate'", font=monospace_font(18), fill=(255, 255, 255))
+    assert frame_changed(sig(base), sig(errored))
+
+
+def test_a_different_window_or_a_black_screen_is_a_change(base: Image.Image) -> None:
+    assert frame_changed(sig(base), sig(Image.new("RGB", (1280, 720), (0, 0, 0))))
+    assert frame_changed(sig(base), sig(render_terminal(1280, 720, font_px=22)))
+
+
+def test_slow_drift_adds_up_against_the_last_analyzed_frame(base: Image.Image) -> None:
+    """Comparing with the last *analyzed* frame means many tiny changes are noticed in the end."""
+    analyzed = sig(base)
+    white = Image.new("RGB", base.size, (255, 255, 255))
+    flags = [frame_changed(analyzed, sig(Image.blend(base, white, step * 0.004))) for step in range(1, 60)]
+    assert not flags[0], "a 0.4% fade must not count as a change"
+    assert any(flags), "a fade that goes on must be noticed eventually"
+    first = flags.index(True)
+    assert all(flags[first:])  # and stays noticed
+
+
+# -- scheduler ------------------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def clock() -> ManualClock:
+    return ManualClock()
+
+
+def scheduler(clock: ManualClock, interval: float = DEFAULT_INTERVAL_S) -> WatchScheduler:
+    s = WatchScheduler(interval, clock)
+    s.start()
+    return s
+
+
+def run_tick(s: WatchScheduler, *, ok: bool = True) -> bool:
+    s.begin()
+    return s.finish(ok)
+
+
+def test_nothing_is_due_until_it_is_started_and_the_first_tick_is_immediate(clock: ManualClock) -> None:
+    s = WatchScheduler(clock=clock)
+    assert not s.due() and not s.running and not s.active
+    s.start()
+    assert s.running and s.active and s.due()
+
+
+def test_the_interval_has_a_floor_and_a_default() -> None:
+    assert WatchScheduler().interval_s == DEFAULT_INTERVAL_S == 10.0
+    assert WatchScheduler(1.0).interval_s == MIN_INTERVAL_S == 5.0
+    assert WatchScheduler(30.0).interval_s == 30.0
+
+
+def test_ticks_are_spaced_by_the_interval(clock: ManualClock) -> None:
+    s = scheduler(clock)
+    s.begin()
+    s.finish(True)
+    for _ in range(9):
+        clock.advance(1.0)
+        assert not s.due()
+    clock.advance(1.0)
+    assert s.due()
+
+
+def test_single_flight_never_starts_a_second_tick_while_one_runs(clock: ManualClock) -> None:
+    s = scheduler(clock)
+    s.begin()
+    clock.advance(60.0)
+    assert s.in_flight and not s.due()
+    s.finish(True)
+    assert s.due()
+
+
+def test_a_busy_app_defers_the_tick_without_losing_it(clock: ManualClock) -> None:
+    s = scheduler(clock)
+    assert not s.due(busy=True)
+    assert s.due(busy=False)
+
+
+def test_a_window_change_triggers_an_early_tick_but_not_inside_the_minimum_gap(clock: ManualClock) -> None:
+    s = scheduler(clock)
+    s.due(window=1)
+    s.begin()
+    s.finish(True)
+    clock.advance(1.0)
+    assert not s.due(window=2)  # changed, but only 1 s since the last tick
+    clock.advance(MIN_GAP_S - 1.0)
+    assert s.due(window=2)
+    s.begin()
+    s.finish(True)
+    clock.advance(MIN_GAP_S)
+    assert not s.due(window=2)  # same window again: wait for the interval
+    clock.advance(DEFAULT_INTERVAL_S)
+    assert s.due(window=2)
+
+
+def test_a_window_change_seen_while_busy_is_not_lost(clock: ManualClock) -> None:
+    s = scheduler(clock)
+    s.due(window=1)
+    s.begin()
+    s.finish(True)
+    clock.advance(MIN_GAP_S)
+    assert not s.due(busy=True, window=2)
+    assert s.due(busy=False)  # window 2 was remembered while the app was busy
+
+
+def test_pause_stops_ticks_and_resume_looks_again_at_once(clock: ManualClock) -> None:
+    s = scheduler(clock)
+    run_tick(s)
+    s.pause()
+    clock.advance(100.0)
+    assert s.paused and not s.active and not s.due()
+    s.resume()
+    assert s.due()
+
+
+def test_pause_and_resume_do_nothing_when_not_watching(clock: ManualClock) -> None:
+    s = WatchScheduler(clock=clock)
+    s.pause()
+    s.resume()
+    assert not s.paused and not s.running
+
+
+def test_stop_clears_everything_and_start_begins_fresh(clock: ManualClock) -> None:
+    s = scheduler(clock)
+    s.begin()
+    s.stop()
+    assert not s.running and not s.in_flight and not s.due()
+    s.start()
+    assert s.due() and s.failures == 0
+
+
+def test_failures_back_off_exponentially_up_to_the_cap_and_a_success_resets(clock: ManualClock) -> None:
+    s = scheduler(clock, 10.0)
+    assert s.current_interval_s == 10.0
+    assert run_tick(s, ok=False) is False and s.current_interval_s == 20.0
+    assert run_tick(s, ok=False) is False and s.current_interval_s == 40.0
+    clock.advance(39.0)
+    assert not s.due()
+    clock.advance(1.0)
+    assert s.due()
+    run_tick(s, ok=True)
+    assert s.failures == 0 and s.current_interval_s == 10.0
+    big = scheduler(clock, 60.0)
+    big.failures = 5
+    assert big.current_interval_s == MAX_BACKOFF_S
+
+
+def test_watching_gives_up_after_too_many_failures_in_a_row(clock: ManualClock) -> None:
+    s = scheduler(clock)
+    results = [run_tick(s, ok=False) for _ in range(MAX_FAILURES)]
+    assert results == [False] * (MAX_FAILURES - 1) + [True]
+
+
+def test_a_window_change_does_not_shortcut_the_back_off(clock: ManualClock) -> None:
+    s = scheduler(clock)
+    s.due(window=1)
+    run_tick(s, ok=False)
+    clock.advance(MIN_GAP_S + 1)
+    assert not s.due(window=2)  # a failing node is not hammered on every window switch
+
+
+# -- reply parsing ----------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "NONE", "None", "none.", "NONE\nThere is no error.", "  none  ", "No error is visible on the screen.", "No errors.",
+        "There is no error message visible.", "There are no errors on this screen.", "Nothing.", "N/A", "I do not see any error.",
+        "I can't tell.", "I don't see an error", "Cannot determine.", "Unable to read the screen.", "Not visible.", "", "   \n ", "**NONE**",
+        '"None"', "`none`",
+    ],
+)
+def test_replies_that_say_nothing_is_wrong_are_not_findings(reply: str) -> None:
+    assert parse_watch_reply(reply) is None
+
+
+@pytest.mark.parametrize(
+    ("reply", "expected"),
+    [
+        ("A KeyError for 'discount_rate' is shown in a Python traceback.", "A KeyError for 'discount_rate' is shown in a Python traceback."),
+        ("**Build failed**: 3 errors in main.c", "Build failed: 3 errors in main.c"),
+        ("\"The app crashed with an access violation.\"", "The app crashed with an access violation."),
+        ("Error: connection refused\nmore detail on a second line", "Error: connection refused"),
+        ("Noticed an exception dialog", "Noticed an exception dialog"),  # starts with "No" but is a finding
+    ],
+)
+def test_real_findings_are_returned_as_one_clean_sentence(reply: str, expected: str) -> None:
+    assert parse_watch_reply(reply) == expected
+
+
+def test_a_very_long_finding_is_cut_on_a_word_boundary() -> None:
+    finding = parse_watch_reply("Error " + "word " * 200)
+    assert finding is not None and len(finding) <= MAX_FINDING_CHARS and finding.endswith("…")
+
+
+def test_the_watch_prompt_asks_for_none_or_one_sentence() -> None:
+    assert "NONE" in WATCH_PROMPT and "one short sentence" in WATCH_PROMPT
+
+
+# -- reporting each finding once -----------------------------------------------------------------------
+
+
+def test_a_persistent_error_is_reported_once_and_a_cleared_screen_rearms_it() -> None:
+    tracker = FindingTracker()
+    assert tracker.report("KeyError in billing.py") == "KeyError in billing.py"
+    assert tracker.report("KeyError in billing.py") is None
+    assert tracker.report("keyerror  in BILLING.py!") is None  # same finding, different punctuation and case
+    assert tracker.report("Build failed") == "Build failed"  # a different finding
+    assert tracker.report(None) is None  # the screen is clean again
+    assert tracker.report("Build failed") == "Build failed"  # so the same error later is news again
+
+
+def test_reset_forgets_the_last_finding() -> None:
+    tracker = FindingTracker()
+    tracker.report("x error")
+    tracker.reset()
+    assert tracker.report("x error") == "x error"
+
+
+def test_module_constants_are_sane(clock: ManualClock) -> None:
+    assert MIN_GAP_S < MIN_INTERVAL_S < DEFAULT_INTERVAL_S < MAX_BACKOFF_S
+    assert MAX_FAILURES >= 2
+    _: Any = clock

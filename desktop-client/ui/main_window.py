@@ -139,6 +139,8 @@ class MainWindow(QWidget):
     stop_speaking_clicked = pyqtSignal()
     search_toggled = pyqtSignal(bool)  # "Search the web"
     smart_toggled = pyqtSignal(bool)  # "Smart query"
+    watch_toggled = pyqtSignal(bool)  # "Watch my screen"
+    watch_pause_clicked = pyqtSignal()
 
     def __init__(self) -> None:
         super().__init__(None)
@@ -274,7 +276,26 @@ class MainWindow(QWidget):
         self.stop_speaking_button.hide()
         options.addWidget(self.stop_speaking_button)
         root.addLayout(options)
-        for box in (self.screen_check, self.memory_check, self.speak_check, self.search_check, self.smart_check):
+
+        watch_row = QHBoxLayout()
+        self.watch_check = QCheckBox("Watch my screen", self)
+        self.watch_check.setAccessibleName("Watch screen")
+        self.watch_check.setToolTip(
+            "Off whenever the app starts. On: every few seconds, if the screen changed, the model on THIS PC checks "
+            "it for an error and tells you once. Needs a local engine. Nothing leaves this PC and nothing is saved."
+        )
+        self.watch_check.toggled.connect(self.watch_toggled)
+        watch_row.addWidget(self.watch_check)
+        self.watch_pause_button = _button("Pause watching", "Pause watching", tooltip="Pause or resume watching (also in the tray menu)")
+        self.watch_pause_button.clicked.connect(self.watch_pause_clicked)
+        self.watch_pause_button.hide()
+        watch_row.addWidget(self.watch_pause_button)
+        self.watch_label = QLabel("", self)
+        self.watch_label.setStyleSheet(f"color: {PEACH}; font-size: 9pt;")
+        self.watch_label.hide()
+        watch_row.addWidget(self.watch_label, 1)
+        root.addLayout(watch_row)
+        for box in (self.screen_check, self.memory_check, self.speak_check, self.search_check, self.smart_check, self.watch_check):
             box.setStyleSheet(f"QCheckBox {{ color: {TEXT}; spacing: 6px; }}")
 
         buttons = QHBoxLayout()
@@ -303,6 +324,19 @@ class MainWindow(QWidget):
             "Ask about your screen…  (Enter to send)" if on else "Message OmniSight (no screenshot is sent)…  (Enter to send)"
         )
         self.send_button.setToolTip("Capture the screen and ask this question" if on else "Send this message without the screen")
+
+    def set_watch_enabled(self, on: bool) -> None:
+        self._set_checked(self.watch_check, on)
+        if not on:
+            self.set_watch_status("")
+
+    def set_watch_status(self, text: str, *, paused: bool = False) -> None:
+        """The always-visible watching indicator ("" hides it and the pause button)."""
+        self.watch_label.setText(text)
+        self.watch_label.setVisible(bool(text))
+        self.watch_pause_button.setVisible(bool(text))
+        self.watch_pause_button.setText("Resume watching" if paused else "Pause watching")
+        self.watch_pause_button.setAccessibleName("Resume watching" if paused else "Pause watching")
 
     def _search_changed(self, on: bool) -> None:
         self.smart_check.setEnabled(on)
