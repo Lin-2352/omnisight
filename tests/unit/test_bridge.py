@@ -1,0 +1,362 @@
+"""The bridge between the controller and the C# app: a real loopback socket, the Qt event loop pumped by the test."""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+import pytest
+from PyQt6.QtNetwork import QAbstractSocket, QHostAddress, QTcpSocket
+
+from core.foreground import ForegroundTracker, WindowInfo
+from core.node_supervisor import NodeState, NodeStatus
+from core.state import AppState
+from network.schemas import AnalyzeResponse, ClientResult, LatencyMetrics
+from tests.support import analyze_response_json, wait_until
+from ui.bridge import MAX_LINE_BYTES, PROTOCOL_VERSION, BridgeWindow
+
+TOKEN = "t0ken-for-tests"
+
+
+class Peer:
+    """A stand-in for the C# app."""
+
+    def __init__(self, qapp: Any, port: int) -> None:
+        self.qapp = qapp
+        self.socket = QTcpSocket()
+        self.socket.connectToHost(QHostAddress.SpecialAddress.LocalHost, port)
+        assert wait_until(lambda: self.socket.state() == QAbstractSocket.SocketState.ConnectedState, 5, self.pump)
+        self.buffer = b""
+        self.events: list[dict[str, Any]] = []
+
+    def pump(self) -> None:
+        self.qapp.processEvents()
+        data = bytes(self.socket.readAll())
+        if data:
+            self.buffer += data
+            while b"\n" in self.buffer:
+                line, self.buffer = self.buffer.split(b"\n", 1)
+                self.events.append(json.loads(line))
+
+    def send(self, message: Any) -> None:
+        raw = message if isinstance(message, bytes) else json.dumps(message).encode()
+        self.socket.write(raw + b"\n")
+        self.socket.flush()
+
+    def auth(self, token: str = TOKEN, pid: int | None = 4242) -> None:
+        self.send({"cmd": "auth", "token": token, **({"pid": pid} if pid is not None else {})})
+
+    def wait_for(self, kind: str, timeout: float = 5.0) -> dict[str, Any]:
+        assert wait_until(lambda: any(e["event"] == kind for e in self.events), timeout, self.pump), f"no {kind!r} in {self.events}"
+        return next(e for e in self.events if e["event"] == kind)
+
+    def closed(self, timeout: float = 5.0) -> bool:
+        return wait_until(lambda: self.socket.state() == QAbstractSocket.SocketState.UnconnectedState, timeout, self.pump)
+
+    def settle(self, seconds: float = 0.3) -> None:
+        wait_until(lambda: False, seconds, self.pump)
+
+
+@pytest.fixture
+def bridge(qapp: Any):
+    window = BridgeWindow(TOKEN)
+    window.port = window.listen()  # type: ignore[attr-defined]
+    yield window
+    window.close()
+
+
+def connect(qapp: Any, bridge: BridgeWindow) -> Peer:
+    peer = Peer(qapp, bridge.port)  # type: ignore[attr-defined]
+    peer.auth()
+    peer.wait_for("hello")
+    return peer
+
+
+def result() -> ClientResult:
+    return ClientResult(response=AnalyzeResponse.model_validate(analyze_response_json()), metrics=LatencyMetrics(tier="local"))
+
+
+# -- trust ---------------------------------------------------------------------------
+
+
+def test_listens_on_loopback_only(bridge: BridgeWindow) -> None:
+    assert bridge._server.serverAddress().isLoopback()
+    assert bridge.port > 0  # type: ignore[attr-defined]
+
+
+def test_empty_token_is_refused_at_construction(qapp: Any) -> None:
+    with pytest.raises(ValueError):
+        BridgeWindow("")
+
+
+def test_wrong_token_is_dropped_and_nothing_is_sent(qapp: Any, bridge: BridgeWindow) -> None:
+    bridge.set_engine("local_gpu")
+    peer = Peer(qapp, bridge.port)  # type: ignore[attr-defined]
+    peer.auth("not-the-token")
+    assert peer.closed()
+    assert peer.events == [] and not bridge.connected
+
+
+@pytest.mark.parametrize("first", [b"not json at all", b"[1, 2]", b'{"cmd": "ask", "text": "hi"}', b'{"cmd": "auth"}', b'{"cmd": "auth", "token": 5}'])
+def test_anything_but_a_valid_auth_first_closes_the_connection(qapp: Any, bridge: BridgeWindow, first: bytes) -> None:
+    asked: list[str] = []
+    bridge.ask_requested.connect(asked.append)
+    peer = Peer(qapp, bridge.port)  # type: ignore[attr-defined]
+    peer.send(first)
+    assert peer.closed()
+    assert asked == [] and not bridge.connected
+
+
+def test_a_client_that_never_authenticates_is_dropped(qapp: Any, bridge: BridgeWindow, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("ui.bridge.AUTH_TIMEOUT_MS", 150)
+    peer = Peer(qapp, bridge.port)  # type: ignore[attr-defined]
+    assert peer.closed(3)
+
+
+def test_only_one_client_at_a_time(qapp: Any, bridge: BridgeWindow) -> None:
+    first = connect(qapp, bridge)
+    second = Peer(qapp, bridge.port)  # type: ignore[attr-defined]
+    assert second.closed()
+    first.send({"cmd": "ping"})
+    first.wait_for("pong")
+
+
+def test_oversized_line_closes_the_connection(qapp: Any, bridge: BridgeWindow) -> None:
+    peer = connect(qapp, bridge)
+    peer.socket.write(b"x" * (MAX_LINE_BYTES + 10))
+    peer.socket.flush()
+    assert peer.closed()
+
+
+def test_hello_carries_the_protocol_version_and_the_peer_pid_is_announced(qapp: Any, bridge: BridgeWindow) -> None:
+    pids: list[int] = []
+    bridge.peer_pid.connect(pids.append)
+    peer = Peer(qapp, bridge.port)  # type: ignore[attr-defined]
+    peer.auth(pid=777)
+    assert peer.wait_for("hello")["protocol"] == PROTOCOL_VERSION
+    assert wait_until(lambda: pids == [777], 3, peer.pump)
+
+
+@pytest.mark.parametrize("pid", [0, -5, "12", True, None])
+def test_a_bad_pid_is_ignored(qapp: Any, bridge: BridgeWindow, pid: Any) -> None:
+    pids: list[int] = []
+    bridge.peer_pid.connect(pids.append)
+    peer = Peer(qapp, bridge.port)  # type: ignore[attr-defined]
+    peer.send({"cmd": "auth", "token": TOKEN, "pid": pid})
+    peer.wait_for("hello")
+    peer.settle()
+    assert pids == []
+
+
+# -- commands become the same signals a click would emit -----------------------------------------
+
+
+def test_commands_emit_the_window_signals(qapp: Any, bridge: BridgeWindow) -> None:
+    seen: list[tuple[str, Any]] = []
+    for name in ("capture_requested", "node_toggle_clicked", "clear_requested", "settings_requested", "stop_speaking_clicked", "watch_pause_clicked", "mic_clicked"):
+        getattr(bridge, name).connect(lambda *a, n=name: seen.append((n, a)))
+    bridge.ask_requested.connect(lambda t: seen.append(("ask", t)))
+    bridge.engine_selected.connect(lambda k: seen.append(("engine", k)))
+    bridge.run_requested.connect(lambda lang, cmd: seen.append(("run", (lang, cmd))))
+    peer = connect(qapp, bridge)
+    for message in (
+        {"cmd": "ask", "text": "  why does this crash?  "},
+        {"cmd": "capture"}, {"cmd": "node_toggle"}, {"cmd": "clear"}, {"cmd": "settings"},
+        {"cmd": "stop_speaking"}, {"cmd": "watch_pause"}, {"cmd": "engine", "key": "local_gpu"},
+        {"cmd": "run", "language": "powershell", "command": "Get-Date"},
+    ):
+        peer.send(message)
+    assert wait_until(lambda: len(seen) == 9, 5, peer.pump), seen
+    assert ("ask", "why does this crash?") in seen and ("engine", "local_gpu") in seen and ("run", ("powershell", "Get-Date")) in seen
+
+
+@pytest.mark.parametrize("name", ["memory", "speak", "search", "smart", "watch", "actions"])
+@pytest.mark.parametrize("on", [True, False])
+def test_each_switch_drives_its_own_signal(qapp: Any, bridge: BridgeWindow, name: str, on: bool) -> None:
+    got: list[bool] = []
+    getattr(bridge, f"{name}_toggled").connect(got.append)
+    peer = connect(qapp, bridge)
+    peer.send({"cmd": "set", "name": name, "on": on})
+    assert wait_until(lambda: got == [on], 3, peer.pump)
+
+
+def test_include_screen_is_a_plain_property_and_voice_carries_typed_text(qapp: Any, bridge: BridgeWindow) -> None:
+    mics: list[str] = []
+    bridge.mic_clicked.connect(lambda: mics.append(bridge.ask_box.text()))
+    peer = connect(qapp, bridge)
+    assert bridge.include_screen is True
+    peer.send({"cmd": "set", "name": "include_screen", "on": False})
+    peer.send({"cmd": "mic", "typed": "  explain this  "})
+    assert wait_until(lambda: mics == ["explain this"], 3, peer.pump)
+    assert bridge.include_screen is False
+    bridge.ask_box.clear()
+    assert bridge.ask_box.text() == ""
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"cmd": "nope"}, {"cmd": 5}, {"nocmd": True}, {"cmd": "ask"}, {"cmd": "ask", "text": "   "}, {"cmd": "ask", "text": 7},
+        {"cmd": "engine"}, {"cmd": "engine", "key": ""}, {"cmd": "set", "name": "memory", "on": "yes"}, {"cmd": "set", "name": "memory", "on": 1},
+        {"cmd": "set", "name": "bogus", "on": True}, {"cmd": "run", "language": "powershell"}, {"cmd": "run", "language": "powershell", "command": "  "},
+        {"cmd": "run", "language": 3, "command": "x"},
+    ],
+)
+def test_bad_commands_get_an_error_event_and_change_nothing(qapp: Any, bridge: BridgeWindow, message: dict[str, Any]) -> None:
+    fired: list[str] = []
+    for name in ("ask_requested", "engine_selected", "memory_toggled", "run_requested"):
+        getattr(bridge, name).connect(lambda *a, n=name: fired.append(n))
+    peer = connect(qapp, bridge)
+    peer.send(message)
+    peer.wait_for("error")
+    assert fired == []
+
+
+def test_invalid_json_after_auth_is_an_error_not_a_crash(qapp: Any, bridge: BridgeWindow) -> None:
+    peer = connect(qapp, bridge)
+    peer.send(b"{broken")
+    peer.send(b"[1]")
+    assert wait_until(lambda: sum(e["event"] == "error" for e in peer.events) == 2, 3, peer.pump)
+    peer.send({"cmd": "ping"})
+    peer.wait_for("pong")
+
+
+# -- events the controller pushes ---------------------------------------------------------------
+
+
+def test_events_reach_the_app(qapp: Any, bridge: BridgeWindow) -> None:
+    peer = connect(qapp, bridge)
+    bridge.set_app_state(AppState.ANALYZING, "Analyzing the screen…")
+    bridge.show_notice("careful", error=True)
+    bridge.set_progress("Searching the web…")
+    bridge.set_node_status(NodeStatus(NodeState.READY, actual_device="GPU: RTX", owned=True), "local_gpu")
+    bridge.add_exchange("why?", result(), searched="python keyerror", note="search was slow")
+    peer.wait_for("exchange")
+    kinds = {e["event"] for e in peer.events}
+    assert {"state", "notice", "progress", "node", "exchange"} <= kinds
+    state = next(e for e in peer.events if e["event"] == "state")
+    assert state == {"event": "state", "state": "analyzing", "message": "Analyzing the screen…"}
+    node = next(e for e in peer.events if e["event"] == "node")
+    assert node["device"] == "GPU: RTX" and node["owned"] is True and node["engine"] == "local_gpu"
+    ex = next(e for e in peer.events if e["event"] == "exchange")
+    assert ex["question"] == "why?" and ex["searched"] == "python keyerror" and ex["note"] == "search was slow"
+    assert ex["response"]["summary"] and ex["metrics"]["tier"] == "local"
+
+
+def test_unicode_survives(qapp: Any, bridge: BridgeWindow) -> None:
+    peer = connect(qapp, bridge)
+    bridge.show_notice("Fehler: Größe → 日本語 “quoted”")
+    assert peer.wait_for("notice")["text"] == "Fehler: Größe → 日本語 “quoted”"
+
+
+def test_a_late_client_gets_the_current_settings_and_the_conversation(qapp: Any, bridge: BridgeWindow) -> None:
+    bridge.set_engine("local_cpu")
+    bridge.set_memory_enabled(False)
+    bridge.set_search_enabled(True)
+    bridge.set_watch_status("Watching every 10 s - frames stay on this PC", paused=True)
+    bridge.set_speak_available(True)
+    bridge.add_exchange("first", result())
+    bridge.add_exchange("second", result())
+    peer = connect(qapp, bridge)
+    peer.settle()
+    assert next(e for e in peer.events if e["event"] == "engine")["key"] == "local_cpu"
+    switches = {e["name"]: e["on"] for e in peer.events if e["event"] == "switch"}
+    assert switches == {"memory": False, "search": True}
+    assert next(e for e in peer.events if e["event"] == "watch")["paused"] is True
+    assert [e["question"] for e in peer.events if e["event"] == "exchange"] == ["first", "second"]
+
+
+def test_clear_empties_what_a_later_client_would_see(qapp: Any, bridge: BridgeWindow) -> None:
+    bridge.add_exchange("q", result())
+    bridge.clear_exchanges()
+    assert bridge.exchange_count == 0
+    peer = connect(qapp, bridge)
+    peer.settle()
+    assert not any(e["event"] == "exchange" for e in peer.events)
+
+
+def test_the_conversation_is_capped(qapp: Any, bridge: BridgeWindow) -> None:
+    for i in range(45):
+        bridge.add_exchange(f"q{i}", result())
+    assert bridge.exchange_count == 30
+
+
+def test_turning_watch_off_clears_its_status(qapp: Any, bridge: BridgeWindow) -> None:
+    peer = connect(qapp, bridge)
+    bridge.set_watch_status("Watching", paused=False)
+    bridge.set_watch_enabled(False)
+    assert wait_until(lambda: [e["text"] for e in peer.events if e["event"] == "watch"][-1:] == [""], 3, peer.pump)
+
+
+def test_sending_with_no_client_is_harmless(qapp: Any, bridge: BridgeWindow) -> None:
+    bridge.show_notice("nobody listening")
+    bridge.set_speaking(True)
+    assert not bridge.connected
+
+
+def test_disconnect_is_reported_and_a_new_client_can_connect(qapp: Any, bridge: BridgeWindow) -> None:
+    states: list[bool] = []
+    bridge.connected_changed.connect(states.append)
+    peer = connect(qapp, bridge)
+    peer.socket.disconnectFromHost()
+    assert wait_until(lambda: states == [True, False], 3, peer.pump)
+    again = connect(qapp, bridge)
+    again.send({"cmd": "ping"})
+    again.wait_for("pong")
+
+
+def test_the_window_interface_the_controller_calls_is_all_there(bridge: BridgeWindow) -> None:
+    for name in (
+        "show", "raise_", "activateWindow", "hide", "set_engine", "set_app_state", "set_node_status", "show_notice", "set_progress",
+        "add_exchange", "clear_exchanges", "set_memory_enabled", "set_speak_enabled", "set_speak_available", "set_speaking",
+        "set_search_enabled", "set_smart_enabled", "set_actions_enabled", "set_watch_enabled", "set_watch_status",
+    ):
+        assert callable(getattr(bridge, name)), name
+    for name in (
+        "ask_requested", "capture_requested", "mic_clicked", "engine_selected", "node_toggle_clicked", "clear_requested", "settings_requested",
+        "memory_toggled", "speak_toggled", "stop_speaking_clicked", "search_toggled", "smart_toggled", "watch_toggled", "actions_toggled",
+        "run_requested", "watch_pause_clicked",
+    ):
+        assert hasattr(bridge, name), name
+    bridge.show(), bridge.raise_(), bridge.activateWindow(), bridge.hide()
+
+
+# -- the peer's windows are never the user's window ------------------------------------------------
+
+
+def test_the_peer_process_is_never_the_users_window() -> None:
+    mine, theirs, user = WindowInfo(1, 100, (10, 10)), WindowInfo(2, 4242, (20, 20)), WindowInfo(3, 555, (30, 30))
+    current = [user]
+    tracker = ForegroundTracker(own_pid=100, probe=lambda: current[0])
+    tracker.poll()
+    assert tracker.last_external == user
+    tracker.add_own_pid(4242)
+    current[0] = theirs
+    tracker.poll()
+    assert tracker.last_external == user and tracker.capture_point() == (30, 30)
+    assert tracker.foreground_is_own()
+    current[0] = mine
+    assert tracker.foreground_is_own()
+    current[0] = user
+    assert not tracker.foreground_is_own()
+
+
+def test_registering_the_pid_forgets_a_window_of_that_process() -> None:
+    tracker = ForegroundTracker(own_pid=1, probe=lambda: WindowInfo(9, 4242, (5, 5)))
+    tracker.poll()
+    assert tracker.last_external is not None
+    tracker.add_own_pid(4242)
+    assert tracker.last_external is None and tracker.capture_point() is None
+
+
+def test_a_handler_that_blows_up_becomes_an_error_event_not_a_dead_process(qapp: Any, bridge: BridgeWindow, monkeypatch: pytest.MonkeyPatch) -> None:
+    peer = connect(qapp, bridge)
+
+    def boom(_message: dict[str, Any]) -> None:
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(bridge, "_cmd_ask", boom)
+    peer.send({"cmd": "ask", "text": "hi"})
+    assert "could not be handled" in peer.wait_for("error")["message"]
+    peer.send({"cmd": "ping"})
+    peer.wait_for("pong")

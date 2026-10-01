@@ -1,0 +1,363 @@
+"""A window that is not a window: the controller's view of an external UI (the C# app) over a loopback socket.
+
+``BridgeWindow`` has the same signals and methods as ``MainWindow``, so ``OmniSightController`` drives it without
+knowing the difference. Instead of drawing, it writes one JSON object per line to the connected app and turns the
+app's commands back into the same signals a click would have emitted.
+
+Trust and limits:
+
+* It listens on 127.0.0.1 only, on a port the OS picks, and the first line from a client must be an ``auth`` message
+  carrying the per-launch token (read from stdin by ``main.py``; never put on a command line).
+* One client at a time. A wrong token, a late or missing ``auth``, an oversized line or garbage closes the connection.
+* A command can only do what a click on the old window could: every switch and action still goes through the
+  controller's own rules (for example "Allow running commands" and the Run approval are enforced in Python).
+
+Events (Python to app) have an ``event`` key; commands (app to Python) have a ``cmd`` key. The sticky events
+(settings, node, status, watch, speaking) are replayed to a client that connects later.
+"""
+
+from __future__ import annotations
+
+import hmac
+import json
+from collections.abc import Callable
+from typing import Any, Final
+
+from core.logger import get_logger
+from core.node_supervisor import NodeStatus
+from core.state import AppState
+from network.schemas import ClientResult
+from PyQt6.QtCore import QObject, QTimer, pyqtSignal
+from PyQt6.QtNetwork import QHostAddress, QTcpServer, QTcpSocket
+
+logger = get_logger("bridge")
+
+PROTOCOL_VERSION: Final[int] = 1
+MAX_LINE_BYTES: Final[int] = 1024 * 1024
+AUTH_TIMEOUT_MS: Final[int] = 5000
+MAX_EXCHANGES: Final[int] = 30
+
+#: ``set`` command names that are plain switches, and the signal each one drives.
+SWITCHES: Final[tuple[str, ...]] = ("memory", "speak", "search", "smart", "watch", "actions")
+
+
+class _TypedText:
+    """Stands in for ``MainWindow.ask_box`` where the controller reads what was typed before a voice question."""
+
+    def __init__(self) -> None:
+        self.value = ""
+
+    def text(self) -> str:
+        return self.value
+
+    def clear(self) -> None:
+        self.value = ""
+
+
+class BridgeWindow(QObject):
+    ask_requested = pyqtSignal(str)
+    capture_requested = pyqtSignal()
+    mic_clicked = pyqtSignal()
+    engine_selected = pyqtSignal(str)
+    node_toggle_clicked = pyqtSignal()
+    clear_requested = pyqtSignal()
+    settings_requested = pyqtSignal()
+    memory_toggled = pyqtSignal(bool)
+    speak_toggled = pyqtSignal(bool)
+    stop_speaking_clicked = pyqtSignal()
+    search_toggled = pyqtSignal(bool)
+    smart_toggled = pyqtSignal(bool)
+    watch_toggled = pyqtSignal(bool)
+    actions_toggled = pyqtSignal(bool)
+    run_requested = pyqtSignal(str, str)
+    watch_pause_clicked = pyqtSignal()
+    #: The app told us its process id: the controller must never capture or watch that process's windows.
+    peer_pid = pyqtSignal(int)
+    connected_changed = pyqtSignal(bool)
+
+    def __init__(self, token: str, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        if not token:
+            raise ValueError("the bridge needs a non-empty token")
+        self._token = token
+        self._server = QTcpServer(self)
+        self._server.newConnection.connect(self._accept)
+        self._client: QTcpSocket | None = None
+        self._authed = False
+        self._buffer = b""
+        self._auth_timer = QTimer(self)
+        self._auth_timer.setSingleShot(True)
+        self._auth_timer.timeout.connect(lambda: self._drop("no auth message in time"))
+        self._sticky: dict[str, dict[str, Any]] = {}
+        self._exchanges: list[dict[str, Any]] = []
+        self.ask_box = _TypedText()
+        self.include_screen = True
+        self.capture_excluded = False
+
+    # -- server ---------------------------------------------------------------------------
+
+    def listen(self) -> int:
+        """Start listening on a free loopback port and return it."""
+        if not self._server.listen(QHostAddress.SpecialAddress.LocalHost, 0):
+            raise OSError(f"bridge could not listen: {self._server.errorString()}")
+        return int(self._server.serverPort())
+
+    def close(self) -> None:
+        self._drop("closing", quiet=True)
+        self._server.close()
+
+    @property
+    def connected(self) -> bool:
+        return self._client is not None and self._authed
+
+    def _accept(self) -> None:
+        while self._server.hasPendingConnections():
+            socket = self._server.nextPendingConnection()
+            if socket is None:
+                return
+            if self._client is not None:  # one client at a time
+                socket.close()
+                socket.deleteLater()
+                continue
+            self._client = socket
+            self._authed = False
+            self._buffer = b""
+            socket.readyRead.connect(self._read)
+            socket.disconnected.connect(lambda: self._drop("client disconnected", quiet=True))
+            self._auth_timer.start(AUTH_TIMEOUT_MS)
+
+    def _drop(self, reason: str, *, quiet: bool = False) -> None:
+        client, self._client = self._client, None
+        was_authed, self._authed = self._authed, False
+        self._buffer = b""
+        self._auth_timer.stop()
+        if client is not None:
+            client.blockSignals(True)
+            client.abort()
+            client.deleteLater()
+            if not quiet:
+                logger.warning("bridge connection closed: %s", reason)
+        if was_authed:
+            self.connected_changed.emit(False)
+
+    def _read(self) -> None:
+        client = self._client
+        if client is None:
+            return
+        self._buffer += bytes(client.readAll())
+        if len(self._buffer) > MAX_LINE_BYTES and b"\n" not in self._buffer[:MAX_LINE_BYTES]:
+            self._drop("line too long")
+            return
+        while self._client is client and b"\n" in self._buffer:
+            line, self._buffer = self._buffer.split(b"\n", 1)
+            if line.strip():
+                try:
+                    self._handle_line(line)
+                except Exception:  # noqa: BLE001 - a bad message must never take the controller down with it
+                    logger.exception("bridge: could not handle a message")
+                    self._send({"event": "error", "message": "that command could not be handled"})
+
+    def _handle_line(self, line: bytes) -> None:
+        try:
+            message = json.loads(line)
+        except (ValueError, UnicodeDecodeError):
+            if not self._authed:
+                self._drop("not a JSON auth message")
+            else:
+                self._send({"event": "error", "message": "that was not valid JSON"})
+            return
+        if not isinstance(message, dict):
+            if self._authed:
+                self._send({"event": "error", "message": "a command must be a JSON object"})
+            else:
+                self._drop("bad first message")
+            return
+        if not self._authed:
+            self._authenticate(message)
+            return
+        self._command(message)
+
+    def _authenticate(self, message: dict[str, Any]) -> None:
+        sent = message.get("token")
+        if message.get("cmd") != "auth" or not isinstance(sent, str) or not hmac.compare_digest(sent.encode(), self._token.encode()):
+            self._drop("bad token")
+            return
+        self._auth_timer.stop()
+        self._authed = True
+        self._send({"event": "hello", "protocol": PROTOCOL_VERSION})
+        for event in self._sticky.values():
+            self._send(event)
+        for exchange in self._exchanges:
+            self._send(exchange)
+        pid = message.get("pid")
+        if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
+            self.peer_pid.emit(pid)
+        self.connected_changed.emit(True)
+
+    # -- commands from the app -----------------------------------------------------------------
+
+    def _command(self, message: dict[str, Any]) -> None:
+        name = message.get("cmd")
+        handlers: dict[str, Callable[[dict[str, Any]], str | None]] = {
+            "ping": lambda _m: self._send({"event": "pong"}) or None,
+            "ask": self._cmd_ask,
+            "capture": lambda _m: self.capture_requested.emit() or None,
+            "mic": self._cmd_mic,
+            "engine": self._cmd_engine,
+            "node_toggle": lambda _m: self.node_toggle_clicked.emit() or None,
+            "clear": lambda _m: self.clear_requested.emit() or None,
+            "settings": lambda _m: self.settings_requested.emit() or None,
+            "stop_speaking": lambda _m: self.stop_speaking_clicked.emit() or None,
+            "watch_pause": lambda _m: self.watch_pause_clicked.emit() or None,
+            "set": self._cmd_set,
+            "run": self._cmd_run,
+        }
+        handler = handlers.get(name) if isinstance(name, str) else None
+        if handler is None:
+            self._send({"event": "error", "message": f"unknown command {name!r}"})
+            return
+        problem = handler(message)
+        if problem:
+            self._send({"event": "error", "message": problem})
+
+    def _cmd_ask(self, message: dict[str, Any]) -> str | None:
+        text = message.get("text")
+        if not isinstance(text, str) or not text.strip():
+            return "ask needs non-empty text"
+        self.ask_requested.emit(text.strip()[:4000])
+        return None
+
+    def _cmd_mic(self, message: dict[str, Any]) -> str | None:
+        typed = message.get("typed", "")
+        self.ask_box.value = typed.strip()[:4000] if isinstance(typed, str) else ""
+        self.mic_clicked.emit()
+        return None
+
+    def _cmd_engine(self, message: dict[str, Any]) -> str | None:
+        key = message.get("key")
+        if not isinstance(key, str) or not key:
+            return "engine needs a key"
+        self.engine_selected.emit(key)
+        return None
+
+    def _cmd_set(self, message: dict[str, Any]) -> str | None:
+        name, on = message.get("name"), message.get("on")
+        if not isinstance(on, bool):
+            return "set needs a true or false value"
+        if name == "include_screen":
+            self.include_screen = on
+            return None
+        if name not in SWITCHES:
+            return f"unknown switch {name!r}"
+        getattr(self, f"{name}_toggled").emit(on)
+        return None
+
+    def _cmd_run(self, message: dict[str, Any]) -> str | None:
+        language, command = message.get("language"), message.get("command")
+        if not isinstance(language, str) or not isinstance(command, str) or not command.strip():
+            return "run needs a language and a command"
+        self.run_requested.emit(language, command)
+        return None
+
+    # -- events to the app (the MainWindow interface the controller calls) ------------------------------
+
+    def _send(self, event: dict[str, Any]) -> None:
+        client = self._client
+        if client is None or not self._authed:
+            return
+        client.write(json.dumps(event, separators=(",", ":"), ensure_ascii=False).encode("utf-8") + b"\n")
+
+    def _emit(self, event: dict[str, Any], *, sticky: str | None = None) -> None:
+        if sticky is not None:
+            self._sticky[sticky] = event
+        self._send(event)
+
+    def show(self) -> None:
+        self._emit({"event": "show"})
+
+    def raise_(self) -> None:
+        return None
+
+    def activateWindow(self) -> None:  # noqa: N802 - Qt name the controller calls
+        return None
+
+    def hide(self) -> None:
+        return None
+
+    def set_engine(self, key: str) -> None:
+        self._emit({"event": "engine", "key": key}, sticky="engine")
+
+    def set_app_state(self, state: AppState, message: str = "") -> None:
+        self._emit({"event": "state", "state": state.value, "message": message}, sticky="state")
+
+    def set_node_status(self, status: NodeStatus, engine_key: str) -> None:
+        self._emit(
+            {
+                "event": "node",
+                "state": status.state.value if hasattr(status.state, "value") else str(status.state),
+                "message": status.message,
+                "device": status.actual_device,
+                "owned": status.owned,
+                "engine": engine_key,
+            },
+            sticky="node",
+        )
+
+    def show_notice(self, text: str, *, error: bool = False) -> None:
+        self._emit({"event": "notice", "text": text, "error": error})
+
+    def set_progress(self, text: str) -> None:
+        self._emit({"event": "progress", "text": text})
+
+    def add_exchange(self, question: str, result: ClientResult, searched: str = "", note: str = "") -> None:
+        event = {
+            "event": "exchange",
+            "question": question,
+            "searched": searched,
+            "note": note,
+            "response": result.response.model_dump(mode="json"),
+            "metrics": result.metrics.model_dump(mode="json"),
+        }
+        self._exchanges.append(event)
+        del self._exchanges[:-MAX_EXCHANGES]
+        self._send(event)
+
+    def clear_exchanges(self) -> None:
+        self._exchanges.clear()
+        self._send({"event": "clear"})
+
+    @property
+    def exchange_count(self) -> int:
+        return len(self._exchanges)
+
+    def _switch(self, name: str, on: bool) -> None:
+        self._emit({"event": "switch", "name": name, "on": on}, sticky=f"switch:{name}")
+
+    def set_memory_enabled(self, on: bool) -> None:
+        self._switch("memory", on)
+
+    def set_speak_enabled(self, on: bool) -> None:
+        self._switch("speak", on)
+
+    def set_search_enabled(self, on: bool) -> None:
+        self._switch("search", on)
+
+    def set_smart_enabled(self, on: bool) -> None:
+        self._switch("smart", on)
+
+    def set_actions_enabled(self, on: bool) -> None:
+        self._switch("actions", on)
+
+    def set_watch_enabled(self, on: bool) -> None:
+        self._switch("watch", on)
+        if not on:
+            self.set_watch_status("")
+
+    def set_speak_available(self, available: bool) -> None:
+        self._emit({"event": "speak_available", "available": available}, sticky="speak_available")
+
+    def set_speaking(self, speaking: bool) -> None:
+        self._emit({"event": "speaking", "on": speaking}, sticky="speaking")
+
+    def set_watch_status(self, text: str, *, paused: bool = False) -> None:
+        self._emit({"event": "watch", "text": text, "paused": paused}, sticky="watch")

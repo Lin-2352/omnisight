@@ -53,6 +53,7 @@ CLIENT_TEST_FILES = (
     "unit/test_run_dialog.py",
     "unit/test_main_window.py",
     "unit/test_user_guide.py",
+    "unit/test_bridge.py",
     "integration/test_dynamic_discovery.py",
     "integration/test_failover_circuit.py",
     "integration/test_full_pipeline_mock.py",

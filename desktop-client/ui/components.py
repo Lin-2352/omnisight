@@ -108,11 +108,18 @@ class StatusPill(QWidget):
 
     def _on_color(self, value: QColor) -> None:
         self._color = value
-        self.update()
+        self._repaint()
 
     def _on_pulse(self, value: float) -> None:
         self._pulse = float(value)
-        self.update()
+        self._repaint()
+
+    def _repaint(self) -> None:
+        # An animation can tick while its widget is being destroyed; PyQt turns any exception in a slot into a process abort.
+        try:
+            self.update()
+        except RuntimeError:
+            pass
 
     @property
     def text(self) -> str:

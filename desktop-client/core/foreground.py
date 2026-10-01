@@ -66,8 +66,18 @@ class ForegroundTracker:
         probe: Callable[[], WindowInfo | None] = win32_foreground,
     ) -> None:
         self.own_pid = os.getpid() if own_pid is None else own_pid
+        self._other_own_pids: set[int] = set()
         self._probe = probe
         self._last_external: WindowInfo | None = None
+
+    def add_own_pid(self, pid: int) -> None:
+        """Another process that is OmniSight's own window (the C# app): never the user's window, never captured."""
+        self._other_own_pids.add(int(pid))
+        if self._last_external is not None and self._last_external.pid == int(pid):
+            self._last_external = None
+
+    def _is_own(self, pid: int) -> bool:
+        return pid == self.own_pid or pid in self._other_own_pids
 
     @property
     def last_external(self) -> WindowInfo | None:
@@ -76,7 +86,7 @@ class ForegroundTracker:
     def poll(self) -> WindowInfo | None:
         """Sample the foreground window; remember it if it belongs to another process."""
         info = self._probe()
-        if info is not None and info.pid != self.own_pid and info.center is not None:
+        if info is not None and not self._is_own(info.pid) and info.center is not None:
             self._last_external = info
         return info
 
@@ -90,4 +100,4 @@ class ForegroundTracker:
 
     def foreground_is_own(self) -> bool:
         info = self._probe()
-        return info is not None and info.pid == self.own_pid
+        return info is not None and self._is_own(info.pid)

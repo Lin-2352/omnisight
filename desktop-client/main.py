@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import dataclasses
+import json
 import os
 import signal
 import socket
@@ -122,7 +123,9 @@ from PyQt6.QtWidgets import (  # noqa: E402
     QPushButton,
     QSystemTrayIcon,
     QVBoxLayout,
+    QWidget,
 )
+from ui.bridge import BridgeWindow  # noqa: E402
 from ui.components import BASE, BLUE, GREEN, SURFACE0, TEXT  # noqa: E402
 from ui.hud import HudWindow  # noqa: E402
 from ui.main_window import MainWindow  # noqa: E402
@@ -488,7 +491,7 @@ class SearchWorker(QThread):
 
 
 class OmniSightController(QObject):
-    def __init__(self, app: QApplication, settings: ClientSettings, enable_hotkeys: bool = True) -> None:
+    def __init__(self, app: QApplication, settings: ClientSettings, enable_hotkeys: bool = True, window: Any | None = None) -> None:
         super().__init__()
         self.app = app
         self.settings = settings
@@ -497,7 +500,7 @@ class OmniSightController(QObject):
         self.capturer = ScreenCapturer()
         self.recorder = AudioRecorder()
         self.hud = HudWindow()
-        self.window = MainWindow()
+        self.window = window if window is not None else MainWindow()  # a BridgeWindow when the C# app is the UI
         self.foreground = ForegroundTracker()
         self.node = NodeSupervisor(repo_root(), settings.local_dev_url)
         saved = QSettings()
@@ -560,6 +563,8 @@ class OmniSightController(QObject):
         self.window.run_requested.connect(self.on_run_requested)
         self.window.watch_pause_clicked.connect(self.toggle_watch_pause)
         self.window.smart_toggled.connect(self.set_smart_enabled)
+        if hasattr(self.window, "peer_pid"):
+            self.window.peer_pid.connect(self.foreground.add_own_pid)
         self.window.set_engine(self.settings.engine_choice)
         self.window.set_memory_enabled(self.memory.enabled)
         self.window.set_speak_available(self.speaker.available)
@@ -647,6 +652,10 @@ class OmniSightController(QObject):
     def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason in (QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick):
             self.open_window()
+
+    def _window_widget(self) -> QWidget | None:
+        """The window as a dialog parent: ``None`` when the UI is not a Qt widget (the bridge)."""
+        return self.window if isinstance(self.window, QWidget) else None
 
     def open_window(self) -> None:
         self.window.show()
@@ -863,7 +872,7 @@ class OmniSightController(QObject):
             ALLOW_ACTIONS_TITLE,
             ALLOW_ACTIONS_TEXT,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            self.window,
+            self._window_widget(),
         )
         box.setDefaultButton(QMessageBox.StandardButton.No)
         box.setEscapeButton(QMessageBox.StandardButton.No)
@@ -891,7 +900,7 @@ class OmniSightController(QObject):
         """
         if not self._actions_enabled or not is_shell_language(language) or not command.strip() or self._run_dialog is not None:
             return
-        dialog = RunDialog(command, language, self.actions, self._actions_cwd, parent=self.window)
+        dialog = RunDialog(command, language, self.actions, self._actions_cwd, parent=self._window_widget())
         self._run_dialog = dialog
         self._action_dialog_open = True
         dialog.finished.connect(self._on_run_dialog_closed)
@@ -1445,6 +1454,27 @@ class _WarmUp(QRunnable):
             logger.warning("capability probe failed: %s", exc)
 
 
+BRIDGE_CONNECT_TIMEOUT_MS: Final[int] = 60_000
+
+
+def start_bridge(app: QApplication) -> BridgeWindow | None:
+    """Listen for the C# app: token from the first stdin line, port announced on stdout, exit when the app goes away."""
+    token = sys.stdin.readline().strip()
+    if not token:
+        print("bridge: no token on stdin", file=sys.stderr)
+        return None
+    bridge = BridgeWindow(token)
+    try:
+        port = bridge.listen()
+    except OSError as exc:
+        print(f"bridge: {exc}", file=sys.stderr)
+        return None
+    bridge.connected_changed.connect(lambda up: app.quit() if not up else None)  # the app owns this process
+    QTimer.singleShot(BRIDGE_CONNECT_TIMEOUT_MS, lambda: app.quit() if not bridge.connected else None)
+    print("OMNISIGHT_BRIDGE " + json.dumps({"port": port, "protocol": 1}), flush=True)
+    return bridge
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="OmniSight desktop client")
     parser.add_argument("--override-url", help="talk to this node instead of discovering it from the gist")
@@ -1452,6 +1482,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-hotkeys", action="store_true", help="do not install the global keyboard hook")
     parser.add_argument("--backend", choices=tuple(BACKENDS), help="auto, kaggle or local (overrides the saved choice)")
     parser.add_argument("--tray-only", action="store_true", help="start in the tray without opening the window")
+    parser.add_argument("--bridge", action="store_true", help="no Qt window: serve the C# app over a loopback socket (token on stdin)")
     args = parser.parse_args(argv)
 
     try:
@@ -1497,9 +1528,15 @@ def main(argv: list[str] | None = None) -> int:
     if not QSystemTrayIcon.isSystemTrayAvailable():
         logger.warning("system tray unavailable; use the hotkeys")
 
-    controller = OmniSightController(app, settings, enable_hotkeys=not args.no_hotkeys)
+    bridge: BridgeWindow | None = None
+    if args.bridge:
+        bridge = start_bridge(app)
+        if bridge is None:
+            lock.release()
+            return 2
+    controller = OmniSightController(app, settings, enable_hotkeys=not args.no_hotkeys, window=bridge)
     app.aboutToQuit.connect(controller.shutdown)
-    if not args.tray_only:
+    if bridge is None and not args.tray_only:
         controller.open_window()
 
     signal.signal(signal.SIGINT, lambda *_: app.quit())

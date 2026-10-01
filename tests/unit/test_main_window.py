@@ -1632,3 +1632,16 @@ def test_the_real_switch_flow_turns_on_only_after_yes(qapp: Any, acting: Any) ->
     controller.window.actions_check.setChecked(True)  # already checked: nothing more to ask
     controller._allow_box.button(QMessageBox.StandardButton.Yes).click()
     assert controller._actions_enabled and controller.window.actions_check.isChecked() and MemorySettings.store["actions_enabled"] is True
+
+
+def test_a_status_pill_animation_that_ticks_after_its_widget_is_gone_does_not_raise(qapp: Any) -> None:
+    from PyQt6 import sip
+    from PyQt6.QtGui import QColor
+
+    from ui.components import StatusPill
+
+    pill = StatusPill()
+    pill.set_state("Working", "#89B4FA", pulsing=True)
+    sip.delete(pill)
+    pill._on_color(QColor("#FF0000"))  # what a late animation tick calls; PyQt would abort the process on an exception here
+    pill._on_pulse(0.5)
