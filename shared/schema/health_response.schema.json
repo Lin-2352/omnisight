@@ -48,7 +48,7 @@
       "title": "Compute Capability"
     },
     "contract_version": {
-      "default": "2.1.0",
+      "default": "2.3.0",
       "title": "Contract Version",
       "type": "string"
     },
@@ -187,6 +187,6 @@
   ],
   "title": "HealthResponse",
   "type": "object",
-  "x-contract-version": "2.1.0",
+  "x-contract-version": "2.3.0",
   "x-generated-by": "omnisight_contracts.export_schema (do not edit by hand)"
 }

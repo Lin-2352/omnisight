@@ -459,7 +459,7 @@ class QwenVisionEngine:
 
         with acquire_gpu(self.gpu_lock, self.settings.queue_timeout_s) as lock_wait_ms:
             started = time.perf_counter()
-            image = load_image(request.image)
+            image = load_image(request.image) if request.image is not None else None
             transcript: str | None = None
             outcome: GenerationOutcome | None = None
             input_tokens = 0
@@ -474,7 +474,7 @@ class QwenVisionEngine:
             if oom:
                 # Outside the except block: the traceback (and the tensors its frames
                 # reference) has been released, so empty_cache can return the memory.
-                raise self._recover_from_oom(request, image.size, input_tokens)
+                raise self._recover_from_oom(request, image.size if image is not None else None, input_tokens)
 
         assert outcome is not None
         return self._build_response(request, outcome, transcript, started, queue_ms + lock_wait_ms)
@@ -494,11 +494,20 @@ class QwenVisionEngine:
             raise InvalidInputError("no speech was detected in the audio clip")
         return text[:MAX_PROMPT_CHARS]
 
-    def _generate(self, request: AnalyzeRequest, image: Image.Image, transcript: str | None) -> GenerationOutcome:
+    def _generate(self, request: AnalyzeRequest, image: Image.Image | None, transcript: str | None) -> GenerationOutcome:
         assert self._model is not None
-        messages = build_messages(request.mode, request.prompt, transcript)
+        messages = build_messages(
+            request.mode,
+            request.prompt,
+            transcript,
+            request.history,
+            has_image=image is not None,
+            web_results=request.web_results,
+        )
         text = self._processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        inputs = self._processor(text=[text], images=[image], return_tensors="pt").to(self._device)
+        # Chat turns carry no screenshot: no vision tokens, so they are fast and cheap on memory.
+        images = [image] if image is not None else None
+        inputs = self._processor(text=[text], images=images, return_tensors="pt").to(self._device)
         prompt_length = int(inputs["input_ids"].shape[1])
         max_new_tokens = min(request.max_new_tokens, MAX_NEW_TOKENS)
         if self._on_cpu:
@@ -568,7 +577,7 @@ class QwenVisionEngine:
         return float(min(1.0, max(0.0, math.exp(total / count))))
 
     def _recover_from_oom(
-        self, request: AnalyzeRequest, image_size: tuple[int, int], input_tokens: int
+        self, request: AnalyzeRequest, image_size: tuple[int, int] | None, input_tokens: int
     ) -> GpuOutOfMemoryError:
         peak = self.peak_memory_bytes()
         gc.collect()
@@ -591,7 +600,7 @@ class QwenVisionEngine:
                 f"peak_mb={peak / MB:.0f}",
                 f"ceiling_mb={self.settings.vram_ceiling_bytes / MB:.0f}",
                 f"input_tokens={input_tokens}",
-                f"image={image_size[0]}x{image_size[1]}",
+                "image=none" if image_size is None else f"image={image_size[0]}x{image_size[1]}",
                 f"max_new_tokens={request.max_new_tokens}",
             ],
         )
@@ -630,6 +639,7 @@ class QwenVisionEngine:
             transcript=transcript,
             confidence=outcome.confidence,
             finish_reason=outcome.finish_reason,  # type: ignore[arg-type]
+            sources=list(request.web_results),
             timings=InferenceTimings(
                 queue_ms=round(queue_ms, 2),
                 ttft_ms=round(ttft_ms, 2),

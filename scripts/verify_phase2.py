@@ -291,7 +291,7 @@ def _phase1() -> str:
     )
     tail = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else ""
     expect(result.returncode == 0, f"verify_phase1 failed:\n{result.stdout[-2500:]}{result.stderr[-1000:]}")
-    expect(oc.CONTRACT_VERSION == "2.1.0", f"contract version is {oc.CONTRACT_VERSION}")
+    expect(oc.CONTRACT_VERSION == "2.3.0", f"contract version is {oc.CONTRACT_VERSION}")
     return tail
 
 

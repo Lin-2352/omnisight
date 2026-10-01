@@ -21,6 +21,7 @@ from omnisight_contracts import (
     AnalyzeRequest,
     AnalyzeResponse,
     AudioPayload,
+    ChatTurn,
     ClientInfo,
     CodeBlock,
     EndpointRecord,
@@ -29,6 +30,7 @@ from omnisight_contracts import (
     HealthResponse,
     ImagePayload,
     InferenceTimings,
+    WebResult,
     split_markdown_segments,
 )
 
@@ -87,6 +89,7 @@ __all__ = [
     "AnalyzeRequest",
     "AnalyzeResponse",
     "AudioPayload",
+    "ChatTurn",
     "ClientInfo",
     "ClientResult",
     "CodeBlock",
@@ -100,5 +103,6 @@ __all__ = [
     "InferenceTimings",
     "LatencyMetrics",
     "Tier",
+    "WebResult",
     "split_markdown_segments",
 ]

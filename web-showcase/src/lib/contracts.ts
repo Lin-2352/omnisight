@@ -3,7 +3,7 @@
 // Do not edit by hand: change the Pydantic models, run `python -m omnisight_contracts.export_schema`,
 // then `npm run gen:types`.
 
-export const CONTRACT_VERSION = "2.1.0";
+export const CONTRACT_VERSION = "2.3.0";
 
 export type DataB64 = string
 
@@ -18,6 +18,15 @@ export type Kind = ("desktop" | "web" | "benchmark" | "test")
 export type Platform = string
 
 export type Version = string
+
+export type Role = ("user" | "assistant")
+
+export type Text = string
+/**
+ * @maxItems 12
+ */
+
+export type History = ChatTurn[]
 /**
  * Standard base64 (RFC 4648) without a data-URL prefix.
  */
@@ -35,7 +44,7 @@ export type MaxNewTokens = number
  * What the user wants from the captured screen.
  */
 
-export type AnalysisMode = ("explain" | "debug" | "summarize" | "ocr" | "voice_query")
+export type AnalysisMode = ("explain" | "debug" | "summarize" | "ocr" | "voice_query" | "chat")
 
 export type Prompt = string
 
@@ -46,6 +55,19 @@ export type RequestId = string
 
 export type Temperature = number
 
+export type Snippet = string
+
+export type Title = string
+
+export type Url = string
+/**
+ * @maxItems 5
+ */
+
+export type WebResults = WebResult[]
+
+export type WebSearch = boolean
+
 /**
  * Body of ``POST /v1/analyze``.
  */
@@ -53,12 +75,15 @@ export type Temperature = number
 export interface AnalyzeRequest {
 audio?: (AudioPayload | null)
 client?: (ClientInfo | null)
-image: ImagePayload
+history?: History
+image?: (ImagePayload | null)
 max_new_tokens?: MaxNewTokens
 mode?: AnalysisMode
 prompt?: Prompt
 request_id?: RequestId
 temperature?: Temperature
+web_results?: WebResults
+web_search?: WebSearch
 }
 /**
  * A push-to-talk voice clip (16-bit PCM WAV).
@@ -80,6 +105,14 @@ platform?: Platform
 version: Version
 }
 /**
+ * One earlier message of the conversation (text only).
+ */
+
+export interface ChatTurn {
+role: Role
+text: Text
+}
+/**
  * A single compressed screenshot, base64 encoded.
  */
 
@@ -88,6 +121,15 @@ data_b64: DataB641
 height: Height
 mime: Mime1
 width: Width
+}
+/**
+ * One web search hit: a quotation with where it came from (never a whole page).
+ */
+
+export interface WebResult {
+snippet?: Snippet
+title: Title
+url: Url
 }
 
 export type Code = string
@@ -117,6 +159,8 @@ export type Markdown = string
 export type ModelId = string
 
 export type Source = ("kaggle" | "gemini" | "deterministic")
+
+export type Sources = WebResult[]
 
 export type Summary = string
 
@@ -153,6 +197,7 @@ markdown: Markdown
 model_id: ModelId
 request_id: RequestId
 source: Source
+sources?: Sources
 summary: Summary
 timings: InferenceTimings
 transcript?: Transcript
@@ -166,7 +211,7 @@ code: Code
 language?: Language
 }
 /**
- * Latency and throughput measurements for one generation.
+ * One web search hit: a quotation with where it came from (never a whole page).
  */
 
 export interface InferenceTimings {
@@ -288,7 +333,7 @@ export type VramTotalMb = number
  * @maxItems 20
  */
 
-export type Warnings = []|[string]|[string, string]|[string, string, string]|[string, string, string, string]|[string, string, string, string, string]|[string, string, string, string, string, string]|[string, string, string, string, string, string, string]|[string, string, string, string, string, string, string, string]|[string, string, string, string, string, string, string, string, string]|[string, string, string, string, string, string, string, string, string, string]|[string, string, string, string, string, string, string, string, string, string, string]|[string, string, string, string, string, string, string, string, string, string, string, string]|[string, string, string, string, string, string, string, string, string, string, string, string, string]|[string, string, string, string, string, string, string, string, string, string, string, string, string, string]|[string, string, string, string, string, string, string, string, string, string, string, string, string, string, string]|[string, string, string, string, string, string, string, string, string, string, string, string, string, string, string, string]|[string, string, string, string, string, string, string, string, string, string, string, string, string, string, string, string, string]|[string, string, string, string, string, string, string, string, string, string, string, string, string, string, string, string, string, string]|[string, string, string, string, string, string, string, string, string, string, string, string, string, string, string, string, string, string, string]|[string, string, string, string, string, string, string, string, string, string, string, string, string, string, string, string, string, string, string, string]
+export type Warnings = string[]
 
 /**
  * Body of ``GET /v1/health``.

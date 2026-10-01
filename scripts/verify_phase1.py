@@ -426,7 +426,7 @@ def _request_roundtrip() -> str:
     again = oc.AnalyzeRequest.model_validate_json(request.model_dump_json())
     expect(again == request, "JSON round-trip changed the request")
     expect(request.max_new_tokens == 512 and request.temperature == 0.1, "defaults changed")
-    expect(oc.CONTRACT_VERSION == "2.1.0", f"unexpected contract version {oc.CONTRACT_VERSION}")
+    expect(oc.CONTRACT_VERSION == "2.3.0", f"unexpected contract version {oc.CONTRACT_VERSION}")
     return f"request_id={str(request.request_id)[:8]}…"
 
 
@@ -608,7 +608,8 @@ def _schema_shape() -> str:
     rendered = {name: json.loads(text) for name, text in render_schemas().items()}
     request = rendered["analyze_request.schema.json"]
     expect(request.get("additionalProperties") is False, "AnalyzeRequest schema must forbid extras")
-    expect("image" in request.get("required", []), "image must be required")
+    expect("image" not in request.get("required", []), "image is optional since 2.2.0 (only chat may omit it; the model enforces that)")
+    expect("history" in request["properties"], "history must be part of the request schema")
     expect(request["$defs"]["AnalysisMode"]["enum"] == [m.value for m in oc.AnalysisMode], "mode enum")
     for name, schema in rendered.items():
         expect(schema.get("x-contract-version") == oc.CONTRACT_VERSION, f"{name} version tag")

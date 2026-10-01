@@ -22,6 +22,8 @@ export type Tier = "kaggle" | "gemini" | "deterministic";
 /** Response headers set by /api/fallback-infer (the body is always a plain AnalyzeResponse). */
 export const TIER_HEADER = "x-omnisight-tier";
 export const TRACE_HEADER = "x-omnisight-trace";
+/** Contract version this deployment speaks; clients send new fields (history, chat) only at >= 2.2.0. */
+export const CONTRACT_HEADER = "x-omnisight-contract";
 
 export const TIER_BANNERS: Record<Tier, string | null> = {
   kaggle: null,
@@ -50,6 +52,8 @@ export interface AnalysisResult {
 }
 
 export interface TunnelStatusResponse {
+  /** Contract version of this deployment's /api/fallback-infer (not of the Kaggle node). */
+  contractVersion: string;
   online: boolean;
   url: string | null;
   /** ISO-8601 time of the node's last gist heartbeat. */

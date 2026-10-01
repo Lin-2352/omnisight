@@ -7,7 +7,8 @@
         "debug",
         "summarize",
         "ocr",
-        "voice_query"
+        "voice_query",
+        "chat"
       ],
       "title": "AnalysisMode",
       "type": "string"
@@ -48,6 +49,32 @@
         "duration_ms"
       ],
       "title": "AudioPayload",
+      "type": "object"
+    },
+    "ChatTurn": {
+      "additionalProperties": false,
+      "description": "One earlier message of the conversation (text only).",
+      "properties": {
+        "role": {
+          "enum": [
+            "user",
+            "assistant"
+          ],
+          "title": "Role",
+          "type": "string"
+        },
+        "text": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "role",
+        "text"
+      ],
+      "title": "ChatTurn",
       "type": "object"
     },
     "ClientInfo": {
@@ -123,6 +150,36 @@
       ],
       "title": "ImagePayload",
       "type": "object"
+    },
+    "WebResult": {
+      "additionalProperties": false,
+      "description": "One web search hit: a quotation with where it came from (never a whole page).",
+      "properties": {
+        "snippet": {
+          "default": "",
+          "maxLength": 600,
+          "title": "Snippet",
+          "type": "string"
+        },
+        "title": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        },
+        "url": {
+          "maxLength": 500,
+          "minLength": 9,
+          "title": "Url",
+          "type": "string"
+        }
+      },
+      "required": [
+        "title",
+        "url"
+      ],
+      "title": "WebResult",
+      "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -151,8 +208,24 @@
       ],
       "default": null
     },
+    "history": {
+      "items": {
+        "$ref": "#/$defs/ChatTurn"
+      },
+      "maxItems": 12,
+      "title": "History",
+      "type": "array"
+    },
     "image": {
-      "$ref": "#/$defs/ImagePayload"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ImagePayload"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     },
     "max_new_tokens": {
       "default": 512,
@@ -183,13 +256,23 @@
       "minimum": 0.0,
       "title": "Temperature",
       "type": "number"
+    },
+    "web_results": {
+      "items": {
+        "$ref": "#/$defs/WebResult"
+      },
+      "maxItems": 5,
+      "title": "Web Results",
+      "type": "array"
+    },
+    "web_search": {
+      "default": false,
+      "title": "Web Search",
+      "type": "boolean"
     }
   },
-  "required": [
-    "image"
-  ],
   "title": "AnalyzeRequest",
   "type": "object",
-  "x-contract-version": "2.1.0",
+  "x-contract-version": "2.3.0",
   "x-generated-by": "omnisight_contracts.export_schema (do not edit by hand)"
 }

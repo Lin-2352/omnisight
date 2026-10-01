@@ -42,6 +42,8 @@ for (const file of files) {
     additionalProperties: false,
     strictIndexSignatures: true,
     unreachableDefinitions: false,
+    // Emit plain arrays for bounded lists (maxItems) instead of a union of tuples of every length.
+    maxItems: -1,
     format: false,
   });
   let blocks = ts

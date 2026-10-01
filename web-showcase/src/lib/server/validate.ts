@@ -3,23 +3,31 @@
 // Node runtime only (uses Buffer).
 import { randomUUID } from "node:crypto";
 
-import type { AnalysisMode, AnalyzeRequest, ErrorCode, ErrorResponse } from "../contracts";
+import type { AnalysisMode, AnalyzeRequest, ChatTurn, ErrorCode, ErrorResponse, WebResult } from "../contracts";
 
 export const MAX_BODY_BYTES = 600 * 1024;
 export const MAX_IMAGE_BYTES = 350 * 1024;
 export const MAX_AUDIO_BYTES = 3 * 1024 * 1024;
 export const MAX_PROMPT_CHARS = 4000;
 export const MAX_NEW_TOKENS = 512;
+export const MAX_HISTORY_TURNS = 12;
+export const MAX_TURN_CHARS = 2000;
+export const MAX_HISTORY_CHARS = 12_000;
+export const MAX_WEB_RESULTS = 5;
+export const MAX_WEB_TITLE_CHARS = 200;
+export const MAX_WEB_URL_CHARS = 500;
+export const MAX_WEB_SNIPPET_CHARS = 600;
 
-const MODES: readonly AnalysisMode[] = ["explain", "debug", "summarize", "ocr", "voice_query"];
+const MODES: readonly AnalysisMode[] = ["explain", "debug", "summarize", "ocr", "voice_query", "chat"];
 const IMAGE_MIMES = ["image/jpeg", "image/png", "image/webp"] as const;
-const TOP_LEVEL_KEYS = new Set(["request_id", "mode", "image", "audio", "prompt", "max_new_tokens", "temperature", "client"]);
+const TOP_LEVEL_KEYS = new Set(["request_id", "mode", "image", "audio", "history", "prompt", "web_results", "web_search", "max_new_tokens", "temperature", "client"]);
 const BASE64 = /^[A-Za-z0-9+/]+={0,2}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export interface ValidatedRequest {
   request: AnalyzeRequest;
-  imageBytes: Buffer;
+  /** Decoded screenshot, or ``null`` for a chat turn without one. */
+  imageBytes: Buffer | null;
 }
 
 export class ValidationError extends Error {
@@ -98,6 +106,78 @@ function parseClient(value: unknown): AnalyzeRequest["client"] {
   return { kind: kind as (typeof CLIENT_KINDS)[number], version, platform };
 }
 
+function parseImage(value: unknown): { payload: NonNullable<AnalyzeRequest["image"]>; bytes: Buffer } {
+  if (!isRecord(value)) throw invalid("image: must be an object");
+  const image = value;
+  for (const key of Object.keys(image)) {
+    if (!["mime", "data_b64", "width", "height"].includes(key)) throw invalid(`image.${key}: extra fields are not permitted`);
+  }
+  const mime = image.mime;
+  if (typeof mime !== "string" || !(IMAGE_MIMES as readonly string[]).includes(mime)) {
+    throw invalid(`image.mime: must be one of ${IMAGE_MIMES.join(", ")}`);
+  }
+  const imageBytes = decodeBase64Strict(image.data_b64, "image.data_b64");
+  if (imageBytes.length > MAX_IMAGE_BYTES) {
+    throw new ValidationError(413, "payload_too_large", `decoded image is ${imageBytes.length} bytes; the limit is ${MAX_IMAGE_BYTES}`);
+  }
+  const actualMime = sniffImageMime(imageBytes);
+  if (actualMime !== mime) throw invalid(`image: declared mime '${mime}' but the bytes are '${actualMime ?? "not an image"}'`);
+  const width = intInRange(image.width, "image.width", 1, 8192);
+  const height = intInRange(image.height, "image.height", 1, 8192);
+  return {
+    payload: { mime: mime as (typeof IMAGE_MIMES)[number], data_b64: String(image.data_b64).replace(/\s+/g, ""), width, height },
+    bytes: imageBytes,
+  };
+}
+
+/** Search hits the client fetched: short quotations with https URLs, capped like the Pydantic ``WebResult``. */
+function parseWebResults(value: unknown): WebResult[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) throw invalid("web_results: must be a list");
+  if (value.length > MAX_WEB_RESULTS) throw invalid(`web_results: at most ${MAX_WEB_RESULTS} results are allowed`);
+  return value.map((item, index): WebResult => {
+    if (!isRecord(item)) throw invalid(`web_results[${index}]: must be an object`);
+    for (const key of Object.keys(item)) {
+      if (key !== "title" && key !== "url" && key !== "snippet") throw invalid(`web_results[${index}].${key}: extra fields are not permitted`);
+    }
+    if (typeof item.title !== "string" || !item.title.trim() || item.title.trim().length > MAX_WEB_TITLE_CHARS) {
+      throw invalid(`web_results[${index}].title: must be 1 to ${MAX_WEB_TITLE_CHARS} characters`);
+    }
+    const url = typeof item.url === "string" ? item.url.trim() : "";
+     
+    if (url.length < 9 || url.length > MAX_WEB_URL_CHARS || !url.startsWith("https://") || /[\s\x00-\x1f]/.test(url)) {
+      throw invalid(`web_results[${index}].url: must be an https:// URL of at most ${MAX_WEB_URL_CHARS} characters without whitespace`);
+    }
+    const snippet = item.snippet === undefined ? "" : item.snippet;
+    if (typeof snippet !== "string" || snippet.trim().length > MAX_WEB_SNIPPET_CHARS) {
+      throw invalid(`web_results[${index}].snippet: must be at most ${MAX_WEB_SNIPPET_CHARS} characters`);
+    }
+    return { title: item.title.trim(), url, snippet: snippet.trim() };
+  });
+}
+
+/** Earlier turns for follow-up questions: text only, oldest first, capped by count, turn and total size. */
+function parseHistory(value: unknown): ChatTurn[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) throw invalid("history: must be a list");
+  if (value.length > MAX_HISTORY_TURNS) throw invalid(`history: at most ${MAX_HISTORY_TURNS} turns are allowed`);
+  let total = 0;
+  const turns = value.map((item, index): ChatTurn => {
+    if (!isRecord(item)) throw invalid(`history[${index}]: must be an object`);
+    for (const key of Object.keys(item)) {
+      if (key !== "role" && key !== "text") throw invalid(`history[${index}].${key}: extra fields are not permitted`);
+    }
+    if (item.role !== "user" && item.role !== "assistant") throw invalid(`history[${index}].role: must be 'user' or 'assistant'`);
+    if (typeof item.text !== "string") throw invalid(`history[${index}].text: must be a string`);
+    const text = item.text.trim();
+    if (!text || text.length > MAX_TURN_CHARS) throw invalid(`history[${index}].text: must be 1 to ${MAX_TURN_CHARS} characters`);
+    total += text.length;
+    return { role: item.role, text };
+  });
+  if (total > MAX_HISTORY_CHARS) throw invalid(`history: ${total} characters; the limit is ${MAX_HISTORY_CHARS}`);
+  return turns;
+}
+
 /** Parse and validate a raw JSON body. Throws ValidationError (400/413/422). */
 export function validateAnalyzeBody(raw: string): ValidatedRequest {
   if (Buffer.byteLength(raw, "utf8") > MAX_BODY_BYTES) {
@@ -122,23 +202,17 @@ export function validateAnalyzeBody(raw: string): ValidatedRequest {
     throw invalid(`mode: must be one of ${MODES.join(", ")}`);
   }
 
-  if (!isRecord(body.image)) throw invalid("image: field required");
-  const image = body.image;
-  for (const key of Object.keys(image)) {
-    if (!["mime", "data_b64", "width", "height"].includes(key)) throw invalid(`image.${key}: extra fields are not permitted`);
+  let image: AnalyzeRequest["image"] = null;
+  let imageBytes: Buffer | null = null;
+  if (body.image === undefined || body.image === null) {
+    if (mode !== "chat") throw invalid(`image: field required for mode '${mode}' (only 'chat' may omit it)`);
+  } else {
+    ({ payload: image, bytes: imageBytes } = parseImage(body.image));
   }
-  const mime = image.mime;
-  if (typeof mime !== "string" || !(IMAGE_MIMES as readonly string[]).includes(mime)) {
-    throw invalid(`image.mime: must be one of ${IMAGE_MIMES.join(", ")}`);
-  }
-  const imageBytes = decodeBase64Strict(image.data_b64, "image.data_b64");
-  if (imageBytes.length > MAX_IMAGE_BYTES) {
-    throw new ValidationError(413, "payload_too_large", `decoded image is ${imageBytes.length} bytes; the limit is ${MAX_IMAGE_BYTES}`);
-  }
-  const actualMime = sniffImageMime(imageBytes);
-  if (actualMime !== mime) throw invalid(`image: declared mime '${mime}' but the bytes are '${actualMime ?? "not an image"}'`);
-  const width = intInRange(image.width, "image.width", 1, 8192);
-  const height = intInRange(image.height, "image.height", 1, 8192);
+  const history = parseHistory(body.history);
+  const webResults = parseWebResults(body.web_results);
+  if (body.web_search !== undefined && typeof body.web_search !== "boolean") throw invalid("web_search: must be true or false");
+  const webSearch = body.web_search === true;
 
   let audio: AnalyzeRequest["audio"] = null;
   if (body.audio !== undefined && body.audio !== null) {
@@ -163,16 +237,19 @@ export function validateAnalyzeBody(raw: string): ValidatedRequest {
   const maxNewTokens = body.max_new_tokens === undefined ? MAX_NEW_TOKENS : intInRange(body.max_new_tokens, "max_new_tokens", 16, MAX_NEW_TOKENS);
   const temperature = body.temperature === undefined ? 0.1 : body.temperature;
   if (typeof temperature !== "number" || temperature < 0 || temperature > 1.5) throw invalid("temperature: must be between 0 and 1.5");
-  if (mode === "voice_query" && !audio && !prompt.trim()) {
-    throw invalid("mode 'voice_query' requires an audio clip or a transcribed prompt");
+  if ((mode === "voice_query" || mode === "chat") && !audio && !prompt.trim()) {
+    throw invalid(`mode '${mode}' requires an audio clip or a prompt`);
   }
 
   return {
     request: {
       request_id: requestId,
       mode: mode as AnalysisMode,
-      image: { mime: mime as (typeof IMAGE_MIMES)[number], data_b64: String(image.data_b64).replace(/\s+/g, ""), width, height },
+      image,
       audio,
+      history,
+      web_results: webResults,
+      web_search: webSearch,
       prompt: prompt.trim(),
       max_new_tokens: maxNewTokens,
       temperature,

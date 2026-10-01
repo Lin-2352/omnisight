@@ -307,7 +307,8 @@ class FakeEngine:
         if self.behavior == "crash":
             raise RuntimeError("boom: secret internal detail")
         with engine_api.acquire_gpu(self.gpu_lock, 5.0) as waited_ms:
-            media.load_image(request.image)
+            if request.image is not None:
+                media.load_image(request.image)
             transcript = None
             if request.audio is not None:
                 samples = media.prepare_for_asr(request.audio)
@@ -323,6 +324,7 @@ class FakeEngine:
                 transcript=transcript,
                 confidence=0.87,
                 finish_reason="stop",
+                sources=list(request.web_results),
                 timings=oc.InferenceTimings(
                     queue_ms=queue_ms + waited_ms,
                     ttft_ms=412.0,

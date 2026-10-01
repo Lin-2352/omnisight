@@ -7,7 +7,10 @@ import type { AnalyzeResponse, ErrorResponse } from "@/lib/contracts";
 import { analyzeDeterministic, analyzeWithGemini, analyzeWithNode, EngineUnavailable, UpstreamRejected } from "@/lib/server/engines";
 import { baseUrl, fetchNodeRecord, probeHealth } from "@/lib/server/gist";
 import { MAX_BODY_BYTES, validateAnalyzeBody, ValidationError } from "@/lib/server/validate";
-import { TIER_HEADER, TRACE_HEADER, type Tier } from "@/lib/types";
+import { CONTRACT_VERSION } from "@/lib/contracts";
+import { CONTRACT_HEADER, TIER_HEADER, TRACE_HEADER, type Tier } from "@/lib/types";
+import { versionAtLeast } from "@/lib/version";
+import type { AnalyzeRequest } from "@/lib/contracts";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -19,14 +22,31 @@ const NODE_TIMEOUT_MS = 45_000;
 const GEMINI_TIMEOUT_MS = 25_000;
 
 function errorJson(status: number, body: ErrorResponse): NextResponse {
-  return NextResponse.json(body, { status, headers: { "Cache-Control": "no-store" } });
+  return NextResponse.json(body, { status, headers: { "Cache-Control": "no-store", [CONTRACT_HEADER]: CONTRACT_VERSION } });
 }
 
 function answer(response: AnalyzeResponse, tier: Tier, trace: string[]): NextResponse {
   return NextResponse.json(response, {
     status: 200,
-    headers: { [TIER_HEADER]: tier, [TRACE_HEADER]: trace.join(";"), "Cache-Control": "no-store" },
+    headers: { [TIER_HEADER]: tier, [TRACE_HEADER]: trace.join(";"), [CONTRACT_HEADER]: CONTRACT_VERSION, "Cache-Control": "no-store" },
   });
+}
+
+/**
+ * What to send a Kaggle node. Nodes forbid unknown fields, so a field a node does not know must be
+ * absent, not merely empty:
+ *   - below 2.3.0: ``web_results`` and ``web_search`` are dropped (the question is still answered);
+ *   - below 2.2.0: ``history`` is dropped too, and an image-less chat turn skips the node.
+ */
+export function requestForNode(request: AnalyzeRequest, nodeContract: string | undefined): AnalyzeRequest | null {
+  if (versionAtLeast(nodeContract, "2.3.0")) return request;
+  const older = { ...request };
+  delete older.web_results;
+  delete older.web_search;
+  if (versionAtLeast(nodeContract, "2.2.0")) return older;
+  if (request.mode === "chat" || !request.image) return null;
+  delete older.history;
+  return older;
 }
 
 export async function POST(request: Request): Promise<NextResponse> {
@@ -54,9 +74,10 @@ export async function POST(request: Request): Promise<NextResponse> {
   if (node.record && "usable" in node && node.usable) {
     const url = baseUrl(node.record);
     const probe = await probeHealth(url, NODE_PROBE_MS);
-    if (probe?.health.model_loaded) {
+    const nodeRequest = probe ? requestForNode(analyzeRequest, probe.health.contract_version) : null;
+    if (probe?.health.model_loaded && nodeRequest) {
       try {
-        const response = await analyzeWithNode(url, analyzeRequest, NODE_TIMEOUT_MS);
+        const response = await analyzeWithNode(url, nodeRequest, NODE_TIMEOUT_MS);
         trace.push("kaggle:ok");
         return answer(response, "kaggle", trace);
       } catch (error) {
@@ -70,7 +91,7 @@ export async function POST(request: Request): Promise<NextResponse> {
         if (!(error instanceof EngineUnavailable)) console.error("kaggle tier error", error);
       }
     } else {
-      trace.push(probe ? "kaggle:loading" : "kaggle:unresponsive");
+      trace.push(probe ? (probe.health.model_loaded ? "kaggle:old-contract" : "kaggle:loading") : "kaggle:unresponsive");
     }
   } else {
     trace.push("kaggle:offline");

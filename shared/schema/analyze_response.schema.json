@@ -59,6 +59,36 @@
       ],
       "title": "InferenceTimings",
       "type": "object"
+    },
+    "WebResult": {
+      "additionalProperties": false,
+      "description": "One web search hit: a quotation with where it came from (never a whole page).",
+      "properties": {
+        "snippet": {
+          "default": "",
+          "maxLength": 600,
+          "title": "Snippet",
+          "type": "string"
+        },
+        "title": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        },
+        "url": {
+          "maxLength": 500,
+          "minLength": 9,
+          "title": "Url",
+          "type": "string"
+        }
+      },
+      "required": [
+        "title",
+        "url"
+      ],
+      "title": "WebResult",
+      "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -88,7 +118,7 @@
       "title": "Confidence"
     },
     "contract_version": {
-      "default": "2.1.0",
+      "default": "2.3.0",
       "title": "Contract Version",
       "type": "string"
     },
@@ -145,6 +175,14 @@
       "title": "Source",
       "type": "string"
     },
+    "sources": {
+      "items": {
+        "$ref": "#/$defs/WebResult"
+      },
+      "maxItems": 8,
+      "title": "Sources",
+      "type": "array"
+    },
     "summary": {
       "maxLength": 500,
       "title": "Summary",
@@ -178,6 +216,6 @@
   ],
   "title": "AnalyzeResponse",
   "type": "object",
-  "x-contract-version": "2.1.0",
+  "x-contract-version": "2.3.0",
   "x-generated-by": "omnisight_contracts.export_schema (do not edit by hand)"
 }

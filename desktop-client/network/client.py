@@ -29,7 +29,7 @@ import random
 import socket
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Final
 from urllib.parse import urlsplit
@@ -41,6 +41,7 @@ from pydantic import ValidationError
 
 from core.config import ANALYZE_PATH, HEALTH_PATH, ClientSettings, EndpointResolver
 from core.logger import get_logger
+from network.negotiation import DEFAULT_PROBE, ContractProbe, TierUnreachable, needs_probe, request_body
 from network.schemas import (
     CONTRACT_VERSION,
     AnalysisMode,
@@ -48,12 +49,14 @@ from network.schemas import (
     AnalyzeResponse,
     AudioPayload,
     ClientInfo,
+    ChatTurn,
     ClientResult,
     ErrorResponse,
     HealthResponse,
     ImagePayload,
     LatencyMetrics,
     Tier,
+    WebResult,
 )
 
 logger = get_logger("network")
@@ -167,7 +170,7 @@ DEFAULT_BREAKER: Final[CircuitBreaker] = CircuitBreaker()
 
 
 def build_request(
-    image: ImagePayload,
+    image: ImagePayload | None,
     *,
     mode: AnalysisMode = AnalysisMode.DEBUG,
     prompt: str = "",
@@ -176,8 +179,14 @@ def build_request(
     audio_sample_rate: int = 16_000,
     max_new_tokens: int = 512,
     platform: str = "win32",
+    history: Sequence[ChatTurn] = (),
+    web_results: Sequence[WebResult] = (),
+    web_search: bool = False,
 ) -> AnalyzeRequest:
-    """Assemble a contract-valid ``AnalyzeRequest`` (raises ``ValidationError`` if not)."""
+    """Assemble a contract-valid ``AnalyzeRequest`` (raises ``ValidationError`` if not).
+
+    ``image`` may be ``None`` only for ``AnalysisMode.CHAT``.
+    """
     import base64
 
     audio = None
@@ -192,6 +201,9 @@ def build_request(
         image=image,
         audio=audio,
         prompt=prompt,
+        history=list(history),
+        web_results=list(web_results),
+        web_search=web_search,
         max_new_tokens=max_new_tokens,
         client=ClientInfo(kind="desktop", version=CONTRACT_VERSION, platform=platform),
     )
@@ -229,6 +241,7 @@ class InferenceClient:
         sleep: Callable[[float], None] = time.sleep,
         rng: random.Random | None = None,
         breaker: CircuitBreaker | None = None,
+        probe: ContractProbe | None = None,
     ) -> None:
         self.settings = settings
         self.resolver = resolver
@@ -236,6 +249,7 @@ class InferenceClient:
         self._sleep = sleep
         self._rng = rng or random.Random()
         self.breaker = breaker or DEFAULT_BREAKER
+        self.probe = probe or DEFAULT_PROBE
 
     def tiers(self) -> list[TierTarget]:
         """Endpoints to try, in order, for the configured backend.
@@ -276,7 +290,6 @@ class InferenceClient:
         on_tier: Callable[[str], None] | None = None,
         cancelled: Callable[[], bool] = lambda: False,
     ) -> ClientResult:
-        body = request.model_dump_json().encode("utf-8")
         failures: list[str] = []
         targets = self.tiers()
         budget_s = self.settings.request_deadline_s
@@ -292,6 +305,19 @@ class InferenceClient:
                 # Failed moments ago: skip it now instead of waiting out another timeout.
                 failures.append(f"{target.tier}: skipped (failed within the last {self.breaker.cooldown_s:.0f} s)")
                 logger.info("%s tier skipped: circuit open for %s", target.tier, target.url)
+                continue
+            try:
+                body = self._body_for(target, request)
+            except TierUnreachable as exc:
+                self.breaker.record_failure(target.url)
+                failures.append(f"{target.tier}: {exc}")
+                logger.warning("%s tier failed its probe: %s", target.tier, exc)
+                if target.tier == "kaggle":
+                    self.resolver.invalidate()
+                continue
+            if body is None:
+                failures.append(f"{target.tier}: too old for chat (contract below 2.2.0)")
+                logger.info("%s tier skipped: it cannot take %s requests", target.tier, request.mode.value)
                 continue
             if on_tier is not None:
                 on_tier(target.tier)
@@ -327,8 +353,20 @@ class InferenceClient:
             )
         if self.settings.backend == "kaggle" and not failures:
             raise InferenceError("The Kaggle node is offline and no web fallback is configured.")
+        if request.image is None and failures and all("too old for chat" in item or "skipped" in item for item in failures):
+            raise InferenceError(
+                "Chat needs a node that speaks contract 2.2.0 and none is available. Start a local node from the "
+                "OmniSight window, or ask about the screen instead."
+            )
         summary = "; ".join(failures) if failures else "no endpoint configured"
         raise InferenceError(f"every inference endpoint failed - {summary}")
+
+    def _body_for(self, target: TierTarget, request: AnalyzeRequest) -> bytes | None:
+        """The request as this tier can read it (``None``: the tier cannot take it at all)."""
+        if not needs_probe(request):
+            return request_body(request)
+        version = self.probe.version(self._session, target.url, web=target.tier == "fallback")
+        return request_body(request, tier_version=version, negotiated=True)
 
     def _backoff(self, attempt: int, floor_s: float | None) -> float:
         delay = self._rng.uniform(0.0, min(BACKOFF_CAP_S, BACKOFF_BASE_S * (2**attempt)))

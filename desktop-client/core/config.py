@@ -113,6 +113,33 @@ BACKENDS: Final[dict[str, str]] = {
 }
 
 
+#: Which device the local node runs on (used when the app starts the node itself).
+LOCAL_DEVICES: Final[dict[str, str]] = {"auto": "automatic", "cuda": "GPU", "cpu": "CPU"}
+
+#: What the user picks in the window: label, routing backend, local node device.
+ENGINE_CHOICES: Final[dict[str, tuple[str, str, str]]] = {
+    "auto": ("Auto: Kaggle, then this PC", "auto", "auto"),
+    "kaggle": ("Kaggle cloud GPU", "kaggle", "auto"),
+    "local_auto": ("This PC: automatic", "local", "auto"),
+    "local_gpu": ("This PC: GPU", "local", "cuda"),
+    "local_cpu": ("This PC: CPU", "local", "cpu"),
+}
+
+
+def engine_choice_key(backend: str, local_device: str) -> str:
+    """The ``ENGINE_CHOICES`` key for a routing backend and local device."""
+    if backend == "local":
+        return {"cuda": "local_gpu", "cpu": "local_cpu"}.get(local_device, "local_auto")
+    return backend if backend in ("auto", "kaggle") else "auto"
+
+
+def _local_device(value: str) -> str:
+    choice = value.strip().lower()
+    if choice not in LOCAL_DEVICES:
+        raise ValueError(f"OMNISIGHT_LOCAL_DEVICE must be one of {', '.join(LOCAL_DEVICES)} (got {value!r})")
+    return choice
+
+
 def _backend(value: str) -> str:
     choice = value.strip().lower()
     if choice not in BACKENDS:
@@ -139,6 +166,8 @@ class ClientSettings:
     #: Which inference backend to use: "auto" (Kaggle -> local node -> web fallback),
     #: "kaggle" (Kaggle -> web fallback) or "local" (this PC's node only, GPU or CPU).
     backend: str = "auto"
+    #: Device the app asks the local node to use when it starts it: auto, cuda or cpu.
+    local_device: str = "auto"
 
     @classmethod
     def from_environment(cls, environ: Mapping[str, str] | None = None, *, load_files: bool = True) -> ClientSettings:
@@ -167,11 +196,27 @@ class ClientSettings:
             max_new_tokens=max_new_tokens,
             log_level=(_first(env, "OMNISIGHT_LOG_LEVEL") or "INFO").upper(),
             backend=_backend(_first(env, "OMNISIGHT_BACKEND") or "auto"),
+            local_device=_local_device(_first(env, "OMNISIGHT_LOCAL_DEVICE") or "auto"),
         )
 
     def with_backend(self, backend: str) -> ClientSettings:
         """Copy with a different backend choice (auto / kaggle / local)."""
         return replace(self, backend=_backend(backend))
+
+    def with_local_device(self, device: str) -> ClientSettings:
+        """Copy with a different device for the local node (auto / cuda / cpu)."""
+        return replace(self, local_device=_local_device(device))
+
+    def with_engine_choice(self, key: str) -> ClientSettings:
+        """Copy with the routing backend and local device of an ``ENGINE_CHOICES`` entry."""
+        if key not in ENGINE_CHOICES:
+            raise ValueError(f"unknown engine choice {key!r}; expected one of {', '.join(ENGINE_CHOICES)}")
+        _, backend, device = ENGINE_CHOICES[key]
+        return replace(self, backend=backend, local_device=device)
+
+    @property
+    def engine_choice(self) -> str:
+        return engine_choice_key(self.backend, self.local_device)
 
     def with_local_url(self, url: str) -> ClientSettings:
         """Copy with a different local node URL (GPU or CPU); an empty value restores the default."""
