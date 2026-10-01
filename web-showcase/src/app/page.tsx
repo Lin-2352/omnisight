@@ -2,11 +2,12 @@ import { Camera, Cloud, Cpu, Mic, ShieldCheck, Zap } from "lucide-react";
 
 import { ArchitectureFlow } from "@/components/ArchitectureFlow";
 import { Header } from "@/components/Header";
+import { FeatureGrid, PrivacyTable, StartSteps } from "@/components/Features";
 import { Hero } from "@/components/Hero";
 import { PlaygroundLoader } from "@/components/PlaygroundLoader";
 import { Footer } from "@/components/Footer";
 
-const FEATURES = [
+const ENGINEERING = [
   {
     icon: Camera,
     title: "Capture-safe HUD",
@@ -46,13 +47,16 @@ export default function HomePage() {
       <main id="main">
         <Hero />
 
-        <section aria-labelledby="features-title" className="mx-auto max-w-6xl px-4 py-16 sm:px-6">
-          <p className="eyebrow">What it does</p>
-          <h2 id="features-title" className="mt-3 text-3xl font-bold tracking-tight text-ink">
-            A second pair of eyes that reads your screen
+        <FeatureGrid />
+        <StartSteps />
+
+        <section aria-labelledby="engineering-title" className="mx-auto max-w-6xl px-4 py-16 sm:px-6">
+          <p className="eyebrow">Under the hood</p>
+          <h2 id="engineering-title" className="mt-3 text-3xl font-bold tracking-tight text-ink">
+            Built to be dependable
           </h2>
           <ul className="mt-10 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
-            {FEATURES.map(({ icon: Icon, title, body }) => (
+            {ENGINEERING.map(({ icon: Icon, title, body }) => (
               <li key={title} className="card p-5">
                 <Icon aria-hidden className="h-5 w-5 text-sky" />
                 <h3 className="mt-3 font-semibold text-ink">{title}</h3>
@@ -78,7 +82,9 @@ export default function HomePage() {
           </div>
         </section>
 
-        <section id="architecture" aria-labelledby="architecture-title" className="mx-auto max-w-6xl scroll-mt-20 px-4 py-16 sm:px-6">
+        <PrivacyTable />
+
+        <section id="architecture" aria-labelledby="architecture-title" className="mx-auto max-w-6xl scroll-mt-20 border-t border-line/60 px-4 py-16 sm:px-6">
           <p className="eyebrow">Architecture</p>
           <h2 id="architecture-title" className="mt-3 text-3xl font-bold tracking-tight text-ink">
             How a screenshot becomes a fix

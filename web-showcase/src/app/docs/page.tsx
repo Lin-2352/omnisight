@@ -2,7 +2,8 @@ import type { Metadata } from "next";
 import type { ReactNode } from "react";
 
 import { Footer } from "@/components/Footer";
-import { Header, REPO_URL } from "@/components/Header";
+import { USER_FEATURES } from "@/components/Features";
+import { GUIDE_URL, Header, REPO_URL } from "@/components/Header";
 
 export const metadata: Metadata = {
   title: "Docs",
@@ -10,6 +11,7 @@ export const metadata: Metadata = {
 };
 
 const SECTIONS = [
+  ["features", "Features"],
   ["architecture", "Architecture"],
   ["discovery", "Node discovery"],
   ["benchmarks", "Measured benchmarks"],
@@ -81,6 +83,23 @@ export default function DocsPage() {
           <p className="mt-4 text-lg text-muted">
             Everything needed to run the GPU node, the Windows client and this site, with the numbers we actually measured.
           </p>
+
+          <Section id="features" title="Features">
+            <p>
+              Everything the Windows app can do, in plain words. The{" "}
+              <a href={GUIDE_URL} rel="noopener noreferrer" target="_blank" className="text-sky underline underline-offset-2">
+                user guide
+              </a>{" "}
+              has the full steps, hotkeys, troubleshooting and limits.
+            </p>
+            <ul className="space-y-3">
+              {USER_FEATURES.map(({ title, body, data }) => (
+                <li key={title}>
+                  <strong className="text-ink">{title}.</strong> {body} <span className="text-emerald-400">{data}</span>
+                </li>
+              ))}
+            </ul>
+          </Section>
 
           <Section id="architecture" title="Architecture">
             <p>The monorepo has three deployables that share one contract package:</p>
