@@ -405,6 +405,15 @@ class MainWindow(QWidget):
         buttons.addWidget(self.clear_button)
         root.addLayout(buttons)
 
+        # Keyboard focus follows what is on screen, top to bottom (creation order would put "Allow running commands" before "Smart query").
+        chain = (
+            self.ask_box, self.send_button, self.screen_check, self.memory_check, self.speak_check, self.search_check, self.smart_check,
+            self.stop_speaking_button, self.watch_check, self.actions_check, self.watch_pause_button, self.capture_button, self.mic_button,
+            self.clear_button,
+        )
+        for first, second in zip(chain, chain[1:]):
+            QWidget.setTabOrder(first, second)
+
         self._refresh_controls()
 
     # -- outgoing actions ------------------------------------------------------------
