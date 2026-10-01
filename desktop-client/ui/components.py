@@ -59,7 +59,6 @@ MAUVE: Final[str] = "#CBA6F7"
 TEAL: Final[str] = "#94E2D5"
 
 MONO_CANDIDATES: Final[tuple[str, ...]] = ("JetBrains Mono", "Cascadia Code", "Consolas", "Courier New")
-SHELL_LANGUAGES: Final[frozenset[str]] = frozenset({"bash", "sh", "powershell", "cmd", "bat", "batch", "console", "shell", "zsh"})
 
 
 def monospace_font(point_size: float = 10.0) -> QFont:

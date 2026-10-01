@@ -546,7 +546,7 @@ class MainWindow(QWidget):
         if self.notice.isVisible() and self._state not in BUSY_STATES:
             self.notice.hide()
 
-    def add_exchange(self, question: str, result: ClientResult, searched: str = "", note: str = "") -> None:
+    def add_exchange(self, question: str, result: ClientResult, searched: str = "", note: str = "", origin: str = "window") -> None:
         self.notice.hide()
         self.empty_label.hide()
         widget = ExchangeWidget(question, result, self._content, searched, note, self._actions_enabled)

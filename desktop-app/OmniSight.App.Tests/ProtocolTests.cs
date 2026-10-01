@@ -40,16 +40,6 @@ public class ProtocolTests
     }
 
     [Fact]
-    public void An_exchange_keeps_its_response_and_metrics_as_json_that_outlives_parsing()
-    {
-        var evt = Assert.IsType<ExchangeEvent>(BridgeProtocol.ParseEvent(
-            """{"event":"exchange","question":"why?","searched":"q","note":"n","response":{"summary":"S","code_blocks":[]},"metrics":{"tier":"local"}}"""));
-        Assert.Equal("why?", evt.Question);
-        Assert.Equal("S", evt.Response.GetProperty("summary").GetString());
-        Assert.Equal("local", evt.Metrics.GetProperty("tier").GetString());
-    }
-
-    [Fact]
     public void Unicode_survives()
     {
         var evt = Assert.IsType<NoticeEvent>(BridgeProtocol.ParseEvent("""{"event":"notice","text":"Größe → 日本語 “q”","error":false}"""));
@@ -85,7 +75,9 @@ public class ProtocolTests
         Assert.Equal(new SwitchEvent("", false), BridgeProtocol.ParseEvent("""{"event":"switch","name":7,"on":"yes"}"""));
         Assert.Equal(new HelloEvent(0), BridgeProtocol.ParseEvent("""{"event":"hello","protocol":"one"}"""));
         var exchange = Assert.IsType<ExchangeEvent>(BridgeProtocol.ParseEvent("""{"event":"exchange"}"""));
-        Assert.Equal(JsonValueKind.Object, exchange.Response.ValueKind);
+        Assert.Equal(("window", "", "stop"), (exchange.Origin, exchange.Question, exchange.Response.FinishReason));
+        Assert.Empty(exchange.Segments);
+        Assert.Empty(exchange.Actions.Run);
     }
 
     [Fact]

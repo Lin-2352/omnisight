@@ -1102,7 +1102,7 @@ class OmniSightController(QObject):
         self.tray.showMessage("OmniSight noticed something", finding, QSystemTrayIcon.MessageIcon.Warning, 10000)
         # An unprompted card never offers "Copy Fix" / "Copy Terminal Command" for code the model read off the screen.
         plain = result.model_copy(update={"response": result.response.model_copy(update={"code_blocks": []})})
-        self.window.add_exchange("Noticed while watching", plain)
+        self.window.add_exchange("Noticed while watching", plain, origin="watch")
 
     # -- web search ------------------------------------------------------------------------------------
 

@@ -3,12 +3,172 @@
                  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
                  xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
                  xmlns:vm="clr-namespace:OmniSight.Core.ViewModels;assembly=OmniSight.Core"
-                 Title="OmniSight" Width="860" Height="760" MinWidth="560" MinHeight="520"
+                 xmlns:md="clr-namespace:OmniSight.Core.Rendering;assembly=OmniSight.Core"
+                 xmlns:v="clr-namespace:OmniSight.App.Views"
+                 Title="OmniSight" Width="900" Height="820" MinWidth="560" MinHeight="560"
                  ExtendsContentIntoTitleBar="True"
                  WindowBackdropType="Mica"
                  WindowCornerPreference="Round"
                  WindowStartupLocation="CenterScreen"
                  AutomationProperties.Name="OmniSight">
+    <ui:FluentWindow.Resources>
+        <v:BoolToVisibilityConverter x:Key="BoolToVisibility" />
+        <v:NonEmptyToVisibilityConverter x:Key="NonEmptyToVisibility" />
+        <v:CountToVisibilityConverter x:Key="CountToVisibility" />
+        <FontFamily x:Key="CodeFont">Cascadia Mono, Consolas, Courier New</FontFamily>
+
+        <Style x:Key="SelectableText" TargetType="TextBox">
+            <Setter Property="IsReadOnly" Value="True" />
+            <Setter Property="IsTabStop" Value="False" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="Margin" Value="0" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+            <Setter Property="Foreground" Value="{DynamicResource TextFillColorPrimaryBrush}" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="TextBox">
+                        <ScrollViewer x:Name="PART_ContentHost" Focusable="False" HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Hidden" />
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- One block of prose: heading, paragraph or list item, built from parsed runs (never markup) -->
+        <DataTemplate DataType="{x:Type md:MarkdownBlock}">
+            <Grid Margin="0,0,0,6">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <TextBlock x:Name="Marker" Grid.Column="0" Margin="0,0,8,0" Visibility="Collapsed"
+                           Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                <TextBlock x:Name="Body" Grid.Column="1" TextWrapping="Wrap" v:RichText.Runs="{Binding Runs}"
+                                     Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+            </Grid>
+            <DataTemplate.Triggers>
+                <DataTrigger Binding="{Binding Kind}" Value="{x:Static md:BlockKind.Bullet}">
+                    <Setter TargetName="Marker" Property="Text" Value="•" />
+                    <Setter TargetName="Marker" Property="Visibility" Value="Visible" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding Kind}" Value="{x:Static md:BlockKind.Numbered}">
+                    <Setter TargetName="Marker" Property="Text" Value="{Binding Number, StringFormat={}{0}.}" />
+                    <Setter TargetName="Marker" Property="Visibility" Value="Visible" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding Kind}" Value="{x:Static md:BlockKind.Heading}">
+                    <Setter TargetName="Body" Property="FontWeight" Value="SemiBold" />
+                    <Setter TargetName="Body" Property="FontSize" Value="16" />
+                </DataTrigger>
+            </DataTemplate.Triggers>
+        </DataTemplate>
+
+        <DataTemplate DataType="{x:Type vm:ProseBlock}">
+            <ItemsControl ItemsSource="{Binding Blocks}" Focusable="False" />
+        </DataTemplate>
+
+        <DataTemplate DataType="{x:Type vm:CodeCardBlock}">
+            <Border CornerRadius="8" Margin="0,2,0,8" Padding="12,8"
+                    Background="{DynamicResource ControlFillColorSecondaryBrush}"
+                    BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}" BorderThickness="1">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <DockPanel Grid.Row="0" Margin="0,0,0,6">
+                        <ui:Button DockPanel.Dock="Right" Content="Copy" Padding="10,3" FontSize="12" Click="OnCopyBlock"
+                                   AutomationProperties.Name="Copy code" ToolTip="Copy this code" />
+                        <TextBlock Text="{Binding Language}" FontSize="12" VerticalAlignment="Center"
+                                   Foreground="{DynamicResource TextFillColorTertiaryBrush}" />
+                    </DockPanel>
+                    <ScrollViewer Grid.Row="1" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
+                        <TextBox Style="{StaticResource SelectableText}" Text="{Binding Code, Mode=OneWay}" FontFamily="{StaticResource CodeFont}"
+                                 FontSize="13" TextWrapping="NoWrap" AutomationProperties.Name="Code" />
+                    </ScrollViewer>
+                </Grid>
+            </Border>
+        </DataTemplate>
+
+        <!-- One question and its answer -->
+        <DataTemplate DataType="{x:Type vm:ExchangeCard}">
+            <Border x:Name="Frame" CornerRadius="10" Padding="18,14" Margin="0,0,0,12" BorderThickness="1"
+                    Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}">
+                <StackPanel>
+                    <TextBox Style="{StaticResource SelectableText}" Text="{Binding Heading, Mode=OneWay}" FontSize="12"
+                             Foreground="{DynamicResource TextFillColorSecondaryBrush}" AutomationProperties.Name="Question" />
+                    <TextBox Style="{StaticResource SelectableText}" Text="{Binding Summary, Mode=OneWay}" FontSize="16" FontWeight="SemiBold"
+                             Margin="0,8,0,10" AutomationProperties.Name="Summary" />
+                    <ItemsControl ItemsSource="{Binding Blocks}" Focusable="False" />
+                    <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+                        <ui:Button Content="Copy Fix" Margin="0,0,8,0" Click="OnCopyFix" AutomationProperties.Name="Copy Fix"
+                                   Visibility="{Binding HasCopyFix, Converter={StaticResource BoolToVisibility}}" />
+                        <ui:Button Content="Copy Terminal Command" Click="OnCopyCommand" AutomationProperties.Name="Copy Terminal Command"
+                                   Visibility="{Binding HasCopyCommand, Converter={StaticResource BoolToVisibility}}" />
+                    </StackPanel>
+                    <ItemsControl ItemsSource="{Binding RunButtons}" Margin="0,8,0,0" Focusable="False"
+                                  Visibility="{Binding ShowRun, Converter={StaticResource BoolToVisibility}}">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <StackPanel Orientation="Horizontal" />
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <ui:Button Content="{Binding Label}" Margin="0,0,8,0" Click="OnRunClick"
+                                           AutomationProperties.Name="{Binding AutomationName}"
+                                           ToolTip="Review this command in a dialog and run it only after you type RUN" />
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    <StackPanel Margin="0,12,0,0" Visibility="{Binding HasSources, Converter={StaticResource BoolToVisibility}}">
+                        <TextBlock Text="{Binding SourcesTitle}" FontSize="12" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                        <ItemsControl ItemsSource="{Binding Sources}" Focusable="False">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate DataType="{x:Type vm:SourceLink}">
+                                    <StackPanel Orientation="Horizontal" Margin="0,2,0,0">
+                                        <TextBlock Text="{Binding Number, StringFormat=[{0}]}" FontSize="12" Margin="0,0,6,0"
+                                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                                        <TextBlock FontSize="12" TextWrapping="Wrap"
+                                                   Visibility="{Binding HasUrl, Converter={StaticResource BoolToVisibility}}">
+                                            <Hyperlink Click="OnSourceClick" Tag="{Binding Url}" Foreground="{DynamicResource AccentTextFillColorPrimaryBrush}"
+                                                       ToolTip="{Binding Url}"><Run Text="{Binding Title, Mode=OneWay}" /></Hyperlink>
+                                        </TextBlock>
+                                        <TextBlock FontSize="12" TextWrapping="Wrap" Text="{Binding Title}"
+                                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                                   Visibility="{Binding HasUrl, Converter={StaticResource BoolToVisibility}, ConverterParameter=invert}" />
+                                    </StackPanel>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </StackPanel>
+                    <TextBlock Text="{Binding Note}" TextWrapping="Wrap" FontSize="12" Margin="0,10,0,0"
+                               Foreground="{DynamicResource SystemFillColorCautionBrush}"
+                               Visibility="{Binding HasNote, Converter={StaticResource BoolToVisibility}}" />
+                    <TextBlock Text="{Binding Details}" FontSize="11" Margin="0,12,0,0"
+                               Foreground="{DynamicResource TextFillColorTertiaryBrush}" />
+                </StackPanel>
+            </Border>
+            <DataTemplate.Triggers>
+                <DataTrigger Binding="{Binding IsWatch}" Value="True">
+                    <Setter TargetName="Frame" Property="BorderBrush" Value="{DynamicResource SystemFillColorCautionBrush}" />
+                </DataTrigger>
+            </DataTemplate.Triggers>
+        </DataTemplate>
+
+        <!-- links in answers must be readable on the card background -->
+        <Style TargetType="Hyperlink">
+            <Setter Property="Foreground" Value="{DynamicResource AccentTextFillColorPrimaryBrush}" />
+            <Setter Property="TextDecorations" Value="Underline" />
+        </Style>
+
+        <Style x:Key="TipTitle" TargetType="TextBlock">
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Margin" Value="0,0,0,4" />
+        </Style>
+    </ui:FluentWindow.Resources>
+
     <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
@@ -17,72 +177,125 @@
 
         <ui:TitleBar Grid.Row="0" Title="OmniSight" ShowMaximize="True" />
 
-        <Grid Grid.Row="1" Margin="24,8,24,24">
+        <Grid Grid.Row="1" Margin="24,4,24,20">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
             </Grid.RowDefinitions>
 
-            <StackPanel Grid.Row="0" Margin="0,0,0,16">
-                <ui:TextBlock Text="OmniSight" FontTypography="Title" />
-                <ui:TextBlock Text="ask your screen" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
-            </StackPanel>
+            <!-- header -->
+            <DockPanel Grid.Row="0" Margin="0,0,0,12">
+                <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
+                    <ui:TextBlock Text="OmniSight" FontTypography="Title" VerticalAlignment="Center" />
+                    <ui:TextBlock Text="ask your screen" Margin="10,10,0,0" VerticalAlignment="Center"
+                                  Foreground="{DynamicResource TextFillColorTertiaryBrush}" />
+                </StackPanel>
+                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right">
+                    <ComboBox x:Name="EngineBox" MinWidth="230" Margin="0,0,8,0" ItemsSource="{Binding Engines}"
+                              DisplayMemberPath="Label" SelectedValuePath="Key" SelectedValue="{Binding SelectedEngineKey, Mode=TwoWay}"
+                              IsEnabled="{Binding CanInput}" AutomationProperties.Name="Engine" ToolTip="Where the answer is computed" />
+                    <ui:Button Content="Clear" Icon="{ui:SymbolIcon Delete24}" Click="OnClear" IsEnabled="{Binding CanInput}"
+                               AutomationProperties.Name="Clear" ToolTip="Clear the answers shown here" />
+                </StackPanel>
+            </DockPanel>
 
-            <ui:Card Grid.Row="1" Padding="20" Margin="0,0,0,12">
-                <StackPanel>
-                    <StackPanel Orientation="Horizontal">
-                        <Ellipse x:Name="Dot" Width="10" Height="10" Margin="0,0,10,0" VerticalAlignment="Center">
-                            <Ellipse.Style>
-                                <Style TargetType="Ellipse">
-                                    <Setter Property="Fill" Value="{DynamicResource SystemFillColorCautionBrush}" />
-                                    <Style.Triggers>
-                                        <DataTrigger Binding="{Binding Connection}" Value="{x:Static vm:ConnectionState.Connected}">
-                                            <Setter Property="Fill" Value="{DynamicResource SystemFillColorSuccessBrush}" />
-                                        </DataTrigger>
-                                        <DataTrigger Binding="{Binding Connection}" Value="{x:Static vm:ConnectionState.Failed}">
-                                            <Setter Property="Fill" Value="{DynamicResource SystemFillColorCriticalBrush}" />
-                                        </DataTrigger>
-                                        <DataTrigger Binding="{Binding Connection}" Value="{x:Static vm:ConnectionState.Disconnected}">
-                                            <Setter Property="Fill" Value="{DynamicResource SystemFillColorCriticalBrush}" />
-                                        </DataTrigger>
-                                    </Style.Triggers>
-                                </Style>
-                            </Ellipse.Style>
-                        </Ellipse>
-                        <ui:TextBlock Text="{Binding ConnectionText}" FontTypography="BodyStrong"
-                                      AutomationProperties.LiveSetting="Polite" />
+            <!-- status pill -->
+            <Border Grid.Row="1" CornerRadius="14" Padding="14,6" Margin="0,0,0,10" HorizontalAlignment="Left"
+                    Background="{DynamicResource ControlFillColorDefaultBrush}"
+                    BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}" BorderThickness="1">
+                <StackPanel Orientation="Horizontal">
+                    <Ellipse Width="9" Height="9" Margin="0,0,10,0" VerticalAlignment="Center">
+                        <Ellipse.Style>
+                            <Style TargetType="Ellipse">
+                                <Setter Property="Fill" Value="{DynamicResource SystemFillColorCautionBrush}" />
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding Connection}" Value="{x:Static vm:ConnectionState.Connected}">
+                                        <Setter Property="Fill" Value="{DynamicResource SystemFillColorSuccessBrush}" />
+                                    </DataTrigger>
+                                    <DataTrigger Binding="{Binding Connection}" Value="{x:Static vm:ConnectionState.Failed}">
+                                        <Setter Property="Fill" Value="{DynamicResource SystemFillColorCriticalBrush}" />
+                                    </DataTrigger>
+                                    <DataTrigger Binding="{Binding Connection}" Value="{x:Static vm:ConnectionState.Disconnected}">
+                                        <Setter Property="Fill" Value="{DynamicResource SystemFillColorCriticalBrush}" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Ellipse.Style>
+                    </Ellipse>
+                    <TextBlock Text="{Binding ConnectionText}" FontWeight="SemiBold" AutomationProperties.LiveSetting="Polite" />
+                    <TextBlock Text="{Binding StatusText}" Margin="12,0,0,0" AutomationProperties.LiveSetting="Polite"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                               Visibility="{Binding StatusText, Converter={StaticResource NonEmptyToVisibility}}" />
+                    <ui:ProgressRing Width="16" Height="16" Margin="12,0,0,0" IsIndeterminate="True"
+                                     Visibility="{Binding IsBusy, Converter={StaticResource BoolToVisibility}}" />
+                    <ui:Button Content="Restart engine" Icon="{ui:SymbolIcon ArrowClockwise24}" Margin="14,-4,-6,-4" Padding="10,3"
+                               Click="OnRestart" AutomationProperties.Name="Restart engine"
+                               Visibility="{Binding CanRestart, Converter={StaticResource BoolToVisibility}}" />
+                </StackPanel>
+            </Border>
+
+            <ui:InfoBar Grid.Row="2" x:Name="Notice" Margin="0,0,0,10" IsClosable="False" Title="" Message="{Binding NoticeText}"
+                        AutomationProperties.Name="Notice" />
+
+            <!-- conversation -->
+            <ScrollViewer Grid.Row="3" x:Name="Scroller" VerticalScrollBarVisibility="Auto" Focusable="False">
+                <Grid>
+                    <StackPanel x:Name="EmptyState" Margin="0,20,0,0"
+                                Visibility="{Binding HasConversation, Converter={StaticResource BoolToVisibility}, ConverterParameter=invert}">
+                        <ui:TextBlock Text="What would you like to know about your screen?" FontTypography="Subtitle" Margin="0,0,0,12" TextWrapping="Wrap" />
+                        <ui:Card Margin="0,0,0,10" Padding="16,12">
+                            <StackPanel>
+                                <TextBlock Style="{StaticResource TipTitle}" Text="Ask" Foreground="{DynamicResource AccentTextFillColorPrimaryBrush}" AutomationProperties.Name="Tip: Ask" />
+                                <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                           Text="Type a question below and press Enter. Turn off “Include my screen” to just chat." />
+                            </StackPanel>
+                        </ui:Card>
+                        <ui:Card Margin="0,0,0,10" Padding="16,12">
+                            <StackPanel>
+                                <TextBlock Style="{StaticResource TipTitle}" Text="Capture" Foreground="{DynamicResource SystemFillColorSuccessBrush}" AutomationProperties.Name="Tip: Capture" />
+                                <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                           Text="Press Capture, or Alt+C anywhere, to have the screen explained." />
+                            </StackPanel>
+                        </ui:Card>
+                        <ui:Card Margin="0,0,0,10" Padding="16,12">
+                            <StackPanel>
+                                <TextBlock Style="{StaticResource TipTitle}" Text="Speak" Foreground="{DynamicResource SystemFillColorCautionBrush}" AutomationProperties.Name="Tip: Speak" />
+                                <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                           Text="Hold Alt+V and ask out loud, or use the Speak button." />
+                            </StackPanel>
+                        </ui:Card>
                     </StackPanel>
-                    <ui:TextBlock Text="{Binding StatusText}" Margin="20,8,0,0"
-                                  Foreground="{DynamicResource TextFillColorSecondaryBrush}"
-                                  AutomationProperties.LiveSetting="Polite" />
-                    <ui:TextBlock Margin="20,4,0,0" Foreground="{DynamicResource TextFillColorTertiaryBrush}">
-                        <Run Text="Engine: " /><Run Text="{Binding EngineKey, Mode=OneWay}" />
-                        <Run Text="   Node: " /><Run Text="{Binding NodeText, Mode=OneWay}" />
-                    </ui:TextBlock>
-                </StackPanel>
-            </ui:Card>
+                    <ItemsControl x:Name="Cards" ItemsSource="{Binding Conversation}" Focusable="False" Margin="0,0,6,0" />
+                </Grid>
+            </ScrollViewer>
 
-            <ui:InfoBar Grid.Row="2" x:Name="Notice" Margin="0,0,0,12" IsClosable="False"
-                        Title="" Message="{Binding NoticeText}" AutomationProperties.Name="Notice" />
-
-            <Grid Grid.Row="3">
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="*" />
-                </Grid.RowDefinitions>
-                <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
-                    <ui:Button Content="Ping" Icon="{ui:SymbolIcon Pulse24}" Click="OnPing"
-                               AutomationProperties.Name="Ping" Margin="0,0,8,0" />
-                    <ui:Button x:Name="RetryButton" Content="Restart engine" Icon="{ui:SymbolIcon ArrowClockwise24}" Click="OnRetry"
-                               AutomationProperties.Name="Restart engine" />
-                </StackPanel>
-                <ui:Card Grid.Row="1" Padding="0">
-                    <ListBox x:Name="EventLog" ItemsSource="{Binding Log}" BorderThickness="0" Background="Transparent"
-                             AutomationProperties.Name="Events" />
-                </ui:Card>
+            <!-- composer -->
+            <Grid Grid.Row="4" Margin="0,12,0,8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <ui:TextBox x:Name="AskBox" Grid.Column="0" Margin="0,0,8,0" MaxLength="4000" ClearButtonEnabled="False"
+                            PlaceholderText="{Binding Placeholder}" Text="{Binding ComposerText, UpdateSourceTrigger=PropertyChanged}"
+                            IsEnabled="{Binding CanInput}" KeyDown="OnAskKeyDown" AutomationProperties.Name="Ask box" />
+                <ui:Button Grid.Column="1" Content="Send" Icon="{ui:SymbolIcon Send24}" Appearance="Primary" Click="OnSend"
+                           IsEnabled="{Binding CanInput}" AutomationProperties.Name="Send" ToolTip="Capture the screen and ask this question" />
             </Grid>
+            <DockPanel Grid.Row="5">
+                <ui:ToggleSwitch DockPanel.Dock="Right" Content="Include my screen" IsChecked="{Binding IncludeScreen, Mode=TwoWay}"
+                                 IsEnabled="{Binding CanInput}" AutomationProperties.Name="Include screen"
+                                 ToolTip="Off: just chat, nothing is captured and no image is sent" />
+                <StackPanel Orientation="Horizontal">
+                    <ui:Button Content="Capture screen" Icon="{ui:SymbolIcon Camera24}" Click="OnCapture" IsEnabled="{Binding CanInput}"
+                               Margin="0,0,8,0" AutomationProperties.Name="Capture" ToolTip="Explain what is on the screen (same as Alt+C)" />
+                    <ui:Button Content="{Binding MicText}" Icon="{ui:SymbolIcon Mic24}" Click="OnMic" IsEnabled="{Binding CanUseMic}"
+                               AutomationProperties.Name="Microphone" ToolTip="Click, ask out loud, click again to send" />
+                </StackPanel>
+            </DockPanel>
         </Grid>
     </Grid>
 </ui:FluentWindow>

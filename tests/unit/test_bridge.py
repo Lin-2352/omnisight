@@ -128,6 +128,17 @@ def test_oversized_line_closes_the_connection(qapp: Any, bridge: BridgeWindow) -
     assert peer.closed()
 
 
+def test_the_engine_choices_come_from_core_config_right_after_hello(qapp: Any, bridge: BridgeWindow) -> None:
+    from core.config import ENGINE_CHOICES
+
+    peer = connect(qapp, bridge)
+    choices = peer.wait_for("engines")["choices"]
+    assert [c["key"] for c in choices] == list(ENGINE_CHOICES)
+    assert [c["label"] for c in choices] == [label for label, _b, _d in ENGINE_CHOICES.values()]
+    kinds = [e["event"] for e in peer.events]
+    assert kinds.index("hello") < kinds.index("engines")
+
+
 def test_hello_carries_the_protocol_version_and_the_peer_pid_is_announced(qapp: Any, bridge: BridgeWindow) -> None:
     pids: list[int] = []
     bridge.peer_pid.connect(pids.append)
@@ -427,3 +438,62 @@ def test_the_other_switches_and_actions_still_work_while_busy(qapp: Any, bridge:
     peer.send({"cmd": "stop_speaking"})
     peer.send({"cmd": "watch_pause"})
     assert wait_until(lambda: got == [True] and stops == [1] and pauses == [1], 20, peer.pump)
+
+
+# -- the exchange event carries ready-made segments and actions, so the app never parses fences out of model text ------------
+
+ANSWER = """**The loop reads scores[3].**
+
+It runs one past the end.
+
+```python
+for i in range(3):
+    print(scores[i])
+```
+
+```powershell
+python app.py
+```
+"""
+
+
+def answer(markdown: str = ANSWER) -> ClientResult:
+    from omnisight_contracts import derive_summary, extract_code_blocks
+
+    data = analyze_response_json()
+    data["markdown"] = markdown
+    data["summary"] = derive_summary(markdown)
+    data["code_blocks"] = [block.model_dump(mode="json") for block in extract_code_blocks(markdown)]
+    return ClientResult(response=AnalyzeResponse.model_validate(data), metrics=LatencyMetrics(tier="local"))
+
+
+def test_exchange_has_segments_actions_and_an_origin(qapp: Any, bridge: BridgeWindow) -> None:
+    peer = connect(qapp, bridge)
+    bridge.add_exchange("why?", answer())
+    ex = peer.wait_for("exchange")
+    assert ex["origin"] == "window"
+    assert [s["kind"] for s in ex["segments"]] == ["prose", "code", "code"]
+    assert ex["segments"][0]["text"] == "It runs one past the end."  # the repeated summary paragraph is gone
+    assert ex["actions"]["copy_fix"].startswith("for i in range(3)")
+    assert ex["actions"]["copy_command"] == "python app.py"
+    assert ex["actions"]["run"] == [{"language": "powershell", "command": "python app.py"}]
+
+
+def test_a_watch_alert_offers_no_copy_or_run_even_though_its_text_has_fences(qapp: Any, bridge: BridgeWindow) -> None:
+    """The controller empties code_blocks for unprompted cards; the app must not get actions back from the markdown."""
+    response = answer().response
+    plain = ClientResult(response=response.model_copy(update={"code_blocks": []}), metrics=LatencyMetrics(tier="local"))
+    peer = connect(qapp, bridge)
+    bridge.add_exchange("Noticed while watching", plain, origin="watch")
+    ex = peer.wait_for("exchange")
+    assert ex["origin"] == "watch"
+    assert ex["actions"] == {"copy_fix": "", "copy_command": "", "run": []}
+    assert any(s["kind"] == "code" for s in ex["segments"])  # still shown (each code block has its own Copy, as in the Qt card)
+
+
+def test_a_late_client_gets_the_same_exchange_with_its_actions(qapp: Any, bridge: BridgeWindow) -> None:
+    bridge.add_exchange("q", answer())
+    peer = connect(qapp, bridge)
+    peer.settle()
+    ex = next(e for e in peer.events if e["event"] == "exchange")
+    assert ex["actions"]["run"] and ex["segments"]

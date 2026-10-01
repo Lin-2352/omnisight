@@ -1,5 +1,13 @@
 using System.ComponentModel;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Windows;
+using System.Windows.Documents;
+using System.Windows.Input;
+using System.Windows.Media;
 using OmniSight.App.Interop;
+using OmniSight.App.Views;
+using OmniSight.Core.Protocol;
 using OmniSight.Core.ViewModels;
 using Wpf.Ui.Controls;
 
@@ -9,33 +17,33 @@ public partial class MainWindow : FluentWindow
 {
     private readonly ShellViewModel _viewModel;
     private readonly Func<Task> _restart;
-    private readonly Func<Task> _ping;
 
-    public MainWindow(ShellViewModel viewModel, Func<Task> restart, Func<Task> ping)
+    public MainWindow(ShellViewModel viewModel, Func<Task> restart)
     {
         _viewModel = viewModel;
         _restart = restart;
-        _ping = ping;
         DataContext = viewModel;
         InitializeComponent();
+
         SourceInitialized += (_, _) =>
         {
             // Never let OmniSight capture itself. If Windows refuses, say so instead of pretending.
             if (!WindowCapture.Allowed && !WindowCapture.Exclude(this))
             {
-                _viewModel.Apply(new Core.Protocol.NoticeEvent("This window could not be hidden from screen capture, so OmniSight may see its own answers.", true));
+                _viewModel.Apply(new NoticeEvent("This window could not be hidden from screen capture, so OmniSight may see its own answers.", true));
             }
         };
         _viewModel.PropertyChanged += OnViewModelChanged;
-        _viewModel.Log.CollectionChanged += (_, _) =>
-        {
-            if (EventLog.Items.Count > 0)
-            {
-                EventLog.ScrollIntoView(EventLog.Items[^1]);
-            }
-        };
+        _viewModel.Conversation.CollectionChanged += (_, _) => Dispatcher.BeginInvoke(() => Scroller.ScrollToEnd(), System.Windows.Threading.DispatcherPriority.Background);
+        _viewModel.CopyRequested += text => _ = CopyAsync(text);
+        _viewModel.OpenLinkRequested += OpenInBrowser;
+        RichText.LinkClicked += OnRichTextLink;
+        Closed += (_, _) => RichText.LinkClicked -= OnRichTextLink;
         SyncNotice();
+        Loaded += (_, _) => AskBox.Focus();
     }
+
+    private void OnRichTextLink(string url) => _viewModel.OpenLink(url);
 
     private void OnViewModelChanged(object? sender, PropertyChangedEventArgs e)
     {
@@ -51,19 +59,126 @@ public partial class MainWindow : FluentWindow
         Notice.Severity = _viewModel.NoticeIsError ? InfoBarSeverity.Error : InfoBarSeverity.Warning;
     }
 
-    private async void OnPing(object sender, System.Windows.RoutedEventArgs e) => await SafeAsync(_ping);
+    // -- composer ---------------------------------------------------------------------------
 
-    private async void OnRetry(object sender, System.Windows.RoutedEventArgs e) => await SafeAsync(_restart);
+    private void OnAskKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Enter && Keyboard.Modifiers == ModifierKeys.None)
+        {
+            e.Handled = true;
+            _viewModel.Send();
+        }
+    }
 
-    private async Task SafeAsync(Func<Task> action)
+    private void OnSend(object sender, RoutedEventArgs e) => _viewModel.Send();
+
+    private void OnCapture(object sender, RoutedEventArgs e) => _viewModel.Capture();
+
+    private void OnMic(object sender, RoutedEventArgs e) => _viewModel.Mic();
+
+    private void OnClear(object sender, RoutedEventArgs e) => _viewModel.Clear();
+
+    private async void OnRestart(object sender, RoutedEventArgs e)
     {
         try
         {
-            await action();
+            await _restart();
         }
         catch (Exception ex)
         {
             _viewModel.SetFailed(ex.Message);
+        }
+    }
+
+    // -- cards ---------------------------------------------------------------------------------
+
+    private void OnCopyFix(object sender, RoutedEventArgs e)
+    {
+        if (CardOf(sender) is { } card)
+        {
+            _viewModel.CopyText(card.CopyFix);
+        }
+    }
+
+    private void OnCopyCommand(object sender, RoutedEventArgs e)
+    {
+        if (CardOf(sender) is { } card)
+        {
+            _viewModel.CopyText(card.CopyCommand);
+        }
+    }
+
+    private void OnCopyBlock(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.DataContext is CodeCardBlock block)
+        {
+            _viewModel.CopyText(block.Code);
+        }
+    }
+
+    private void OnRunClick(object sender, RoutedEventArgs e)
+    {
+        // Only asks Python to open its approval dialog; the view model refuses a button that is not shown on that card.
+        if ((sender as FrameworkElement)?.DataContext is RunButton button && CardOf(sender) is { } card)
+        {
+            _viewModel.RequestRun(card, button);
+        }
+    }
+
+    private void OnSourceClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is Hyperlink { Tag: string url })
+        {
+            _viewModel.OpenLink(url);
+        }
+    }
+
+    /// <summary>The card a control sits in (the nearest ancestor whose data is an <see cref="ExchangeCard"/>).</summary>
+    private static ExchangeCard? CardOf(object sender)
+    {
+        DependencyObject? node = sender as DependencyObject;
+        while (node is not null)
+        {
+            if (node is FrameworkElement { DataContext: ExchangeCard card })
+            {
+                return card;
+            }
+
+            node = node is Visual or System.Windows.Media.Media3D.Visual3D ? VisualTreeHelper.GetParent(node) : LogicalTreeHelper.GetParent(node);
+        }
+
+        return null;
+    }
+
+    // -- clipboard and links (both already validated by the view model) -----------------------------
+
+    private async Task CopyAsync(string text)
+    {
+        for (var attempt = 0; attempt < 5; attempt++)
+        {
+            try
+            {
+                Clipboard.SetText(text);
+                return;
+            }
+            catch (COMException)
+            {
+                await Task.Delay(60);  // another program has the clipboard open for a moment
+            }
+        }
+
+        _viewModel.Apply(new NoticeEvent("Could not copy: the clipboard is busy. Try again.", true));
+    }
+
+    private void OpenInBrowser(string safeUrl)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo(safeUrl) { UseShellExecute = true });
+        }
+        catch (Exception ex) when (ex is Win32Exception or InvalidOperationException)
+        {
+            _viewModel.Apply(new NoticeEvent("Could not open the link.", true));
         }
     }
 }

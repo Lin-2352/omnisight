@@ -17,7 +17,8 @@ public partial class App : Application
     protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
-        _window = new MainWindow(_viewModel, StartEngineAsync, PingAsync);
+        _viewModel.CommandRequested += OnCommand;
+        _window = new MainWindow(_viewModel, StartEngineAsync);
         MainWindow = _window;
         ApplicationThemeManager.ApplySystemTheme();
         _window.Show();
@@ -39,7 +40,25 @@ public partial class App : Application
         base.OnExit(e);
     }
 
-    private Task PingAsync() => _client is { IsConnected: true } ? _client.SendAsync(BridgeCommands.Ping()) : Task.CompletedTask;
+    /// <summary>Whatever the window asks for goes to the Python client; if it cannot be reached the person is told.</summary>
+    private async void OnCommand(string json)
+    {
+        try
+        {
+            var client = _client;
+            if (client is not { IsConnected: true })
+            {
+                _viewModel.Apply(new NoticeEvent("The OmniSight engine is not running. Use Restart engine.", true));
+                return;
+            }
+
+            await client.SendAsync(json);
+        }
+        catch (BridgeException ex)
+        {
+            _viewModel.Apply(new NoticeEvent(ex.Message, true));
+        }
+    }
 
     private async Task StartEngineAsync()
     {

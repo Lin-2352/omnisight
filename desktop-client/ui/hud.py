@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import ctypes
 import os
-import re
 from collections.abc import Callable
 from typing import Final
 
@@ -30,13 +29,13 @@ from PyQt6.QtWidgets import (
 
 from core.logger import get_logger
 from core.state import AppState
-from network.schemas import ClientResult, split_markdown_segments
+from core.answer import body_segments, copy_actions
+from network.schemas import ClientResult
 from ui.components import (
     BLUE,
     GREEN,
     OVERLAY0,
     RED,
-    SHELL_LANGUAGES,
     SUBTEXT,
     SURFACE0,
     SURFACE1,
@@ -138,11 +137,6 @@ class SummaryWidget(QLabel):
         self.setStyleSheet(f"color: {TEXT}; font-size: 11.5pt; font-weight: 700; line-height: 130%;")
 
 
-def _plain(text: str) -> str:
-    """Markdown-insensitive comparison key (drops inline markup and whitespace differences)."""
-    return " ".join(re.sub(r"[`*_]", "", text).split()).rstrip(".").lower()
-
-
 class DiagnosticWidget(QWidget):
     """Markdown answer: prose through Qt's markdown renderer, code through ``CodeBlockWidget``."""
 
@@ -166,12 +160,7 @@ class DiagnosticWidget(QWidget):
     def set_markdown(self, markdown: str, skip_leading: str = "") -> None:
         """Render ``markdown``; drop its first paragraph if it only repeats ``skip_leading`` (the summary)."""
         self.clear()
-        segments = split_markdown_segments(markdown)
-        if skip_leading and segments and segments[0].kind == "prose":
-            first, _, rest = segments[0].text.partition("\n\n")
-            if _plain(first) == _plain(skip_leading):
-                segments = ([type(segments[0])("prose", rest)] if rest.strip() else []) + segments[1:]
-        for segment in segments:
+        for segment in body_segments(markdown, skip_leading):
             if segment.kind == "code":
                 block = CodeBlockWidget(segment.text, segment.language, self)
                 block.copied.connect(self.copied)
@@ -210,8 +199,7 @@ class ActionWidget(QWidget):
 
     def set_blocks(self, blocks: list[tuple[str, str]]) -> None:
         """``blocks`` is ``[(language, code), ...]`` in document order."""
-        fix = next((code for language, code in blocks if language not in SHELL_LANGUAGES), "")
-        command = next((code for language, code in blocks if language in SHELL_LANGUAGES), "")
+        fix, command = copy_actions(blocks)
         self.copy_fix.set_payload(fix)
         self.copy_command.set_payload(command)
 

@@ -1315,11 +1315,15 @@ def test_the_gpu_engine_gets_no_cpu_warning(qapp: Any, watching: Any) -> None:
 def test_an_unprompted_alert_card_offers_no_code_to_copy(qapp: Any, watching: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     controller, fake, clock, tray = watching()
     shown: list[Any] = []
-    monkeypatch.setattr(controller.window, "add_exchange", lambda question, result, searched="": shown.append(result))
+    origins: list[str] = []
+    monkeypatch.setattr(
+        controller.window, "add_exchange", lambda question, result, searched="", note="", origin="window": (shown.append(result), origins.append(origin))
+    )
     response = AnalyzeResponse.model_validate(analyze_response_json())
     assert response.code_blocks, "the fake answer contains a code block"
     controller._notify_finding("Build failed", ClientResult(response=response, metrics=LatencyMetrics(tier="local")))
     assert shown and shown[0].response.code_blocks == [] and shown[0].response.markdown == response.markdown
+    assert origins == ["watch"]
     assert tray.messages == [("OmniSight noticed something", "Build failed")]
 
 

@@ -23,6 +23,8 @@ import json
 from collections.abc import Callable
 from typing import Any, Final
 
+from core.answer import body_segments, copy_actions, run_commands
+from core.config import ENGINE_CHOICES
 from core.logger import get_logger
 from core.node_supervisor import NodeStatus
 from core.state import AppState
@@ -193,6 +195,8 @@ class BridgeWindow(QObject):
         self._auth_timer.stop()
         self._authed = True
         self._send({"event": "hello", "protocol": PROTOCOL_VERSION})
+        # The engine labels live in one place (core.config); the app only displays what it is told.
+        self._send({"event": "engines", "choices": [{"key": key, "label": label} for key, (label, _b, _d) in ENGINE_CHOICES.items()]})
         for event in self._sticky.values():
             self._send(event)
         for exchange in self._exchanges:
@@ -330,14 +334,23 @@ class BridgeWindow(QObject):
     def set_progress(self, text: str) -> None:
         self._emit({"event": "progress", "text": text})
 
-    def add_exchange(self, question: str, result: ClientResult, searched: str = "", note: str = "") -> None:
+    def add_exchange(self, question: str, result: ClientResult, searched: str = "", note: str = "", origin: str = "window") -> None:
+        response = result.response
+        blocks = [(block.language, block.code) for block in response.code_blocks]
+        fix, command = copy_actions(blocks)
         event = {
             "event": "exchange",
+            "origin": origin,
             "question": question,
             "searched": searched,
             "note": note,
-            "response": result.response.model_dump(mode="json"),
+            "response": response.model_dump(mode="json"),
             "metrics": result.metrics.model_dump(mode="json"),
+            # Decided here, once, from code_blocks only (watch alerts have none): the app never parses fences out of model text.
+            "segments": [
+                {"kind": s.kind, "text": s.text, "language": s.language} for s in body_segments(response.markdown, response.summary)
+            ],
+            "actions": {"copy_fix": fix, "copy_command": command, "run": run_commands(blocks)},
         }
         self._exchanges.append(event)
         del self._exchanges[:-MAX_EXCHANGES]
