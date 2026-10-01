@@ -59,13 +59,27 @@ _BUTTON = (
     f"QPushButton {{ background: {SURFACE0}; color: {TEXT}; border: 1px solid {SURFACE1}; border-radius: 8px; "
     f"padding: 7px 14px; font-weight: 600; }}"
     f"QPushButton:hover {{ background: {SURFACE1}; }}"
+    f"QPushButton:focus {{ border: 1px solid {BLUE}; }}"
     f"QPushButton:disabled {{ color: {OVERLAY0}; background: {MANTLE}; }}"
 )
 _PRIMARY = (
     f"QPushButton {{ background: {BLUE}; color: {BASE}; border: none; border-radius: 8px; padding: 7px 18px; font-weight: 700; }}"
     f"QPushButton:hover {{ background: #B4D0FB; }}"
+    f"QPushButton:focus {{ border: 2px solid {TEXT}; }}"
     f"QPushButton:disabled {{ background: {SURFACE1}; color: {OVERLAY0}; }}"
 )
+# A checkbox drawn as a small chip: the switches read as a set of options, yet each is still a real QCheckBox for assistive tech.
+_CHIP = (
+    f"QCheckBox {{ color: {TEXT}; spacing: 7px; padding: 5px 10px; border: 1px solid {SURFACE1}; border-radius: 14px; background: {SURFACE0}; }}"
+    f"QCheckBox:hover {{ background: {SURFACE1}; }}"
+    f"QCheckBox:checked {{ border-color: {BLUE}; }}"
+    f"QCheckBox:focus {{ border: 2px solid {BLUE}; padding: 4px 9px; }}"
+    f"QCheckBox:disabled {{ color: {OVERLAY0}; background: {MANTLE}; border-color: {SURFACE0}; }}"
+    f"QCheckBox::indicator {{ width: 14px; height: 14px; border-radius: 4px; border: 1px solid {OVERLAY0}; background: {BASE}; }}"
+    f"QCheckBox::indicator:checked {{ background: {BLUE}; border-color: {BLUE}; }}"
+    f"QCheckBox::indicator:disabled {{ border-color: {SURFACE1}; }}"
+)
+_CAPTION = f"color: {OVERLAY0}; font-size: 8pt; font-weight: 700; letter-spacing: 1px;"
 _RECORDING = (
     f"QPushButton {{ background: {RED}; color: {BASE}; border: none; border-radius: 8px; padding: 7px 14px; font-weight: 700; }}"
 )
@@ -90,7 +104,10 @@ class ExchangeWidget(QFrame):
     ) -> None:
         super().__init__(parent)
         response, metrics = result.response, result.metrics
-        self.setStyleSheet(f"ExchangeWidget {{ background: {MANTLE}; border: 1px solid {SURFACE0}; border-radius: 10px; }}")
+        self.setStyleSheet(
+            f"ExchangeWidget {{ background: {MANTLE}; border: 1px solid {SURFACE0}; border-radius: 12px; }}"
+            f"ExchangeWidget:hover {{ border-color: {SURFACE1}; }}"
+        )
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(10)
@@ -180,6 +197,8 @@ class MainWindow(QWidget):
             f"MainWindow {{ background: {BASE}; }} QLabel {{ color: {TEXT}; }}"
             f"QLineEdit, QComboBox {{ background: {SURFACE0}; color: {TEXT}; border: 1px solid {SURFACE1}; "
             f"border-radius: 8px; padding: 8px; font-size: 10.5pt; }}"
+            f"QLineEdit:focus, QComboBox:focus {{ border: 1px solid {BLUE}; }}"
+            f"QToolTip {{ background: {SURFACE0}; color: {TEXT}; border: 1px solid {SURFACE1}; padding: 4px; }}"
             f"QComboBox QAbstractItemView {{ background: {SURFACE0}; color: {TEXT}; selection-background-color: {SURFACE1}; }}"
         )
         self.capture_excluded = False
@@ -196,8 +215,11 @@ class MainWindow(QWidget):
 
         header = QHBoxLayout()
         title = QLabel("OmniSight", self)
-        title.setStyleSheet(f"color: {TEXT}; font-size: 15pt; font-weight: 800;")
+        title.setStyleSheet(f"color: {TEXT}; font-size: 16pt; font-weight: 800;")
         header.addWidget(title)
+        tagline = QLabel("ask your screen", self)
+        tagline.setStyleSheet(f"color: {OVERLAY0}; font-size: 9pt; padding-top: 6px;")
+        header.addWidget(tagline)
         header.addStretch(1)
         self.engine = QComboBox(self)
         self.engine.setAccessibleName("Engine")
@@ -216,7 +238,9 @@ class MainWindow(QWidget):
 
         self.status = QLabel("", self)
         self.status.setWordWrap(True)
-        self.status.setStyleSheet(f"color: {SUBTEXT}; font-size: 9.5pt;")
+        self.status.setStyleSheet(
+            f"color: {SUBTEXT}; font-size: 9.5pt; background: {MANTLE}; border: 1px solid {SURFACE0}; border-radius: 12px; padding: 5px 12px;"
+        )
         root.addWidget(self.status)
 
         self.scroll = QScrollArea(self)
@@ -233,14 +257,34 @@ class MainWindow(QWidget):
         self._list = QVBoxLayout(self._content)
         self._list.setContentsMargins(0, 0, 8, 0)
         self._list.setSpacing(12)
-        self.empty_label = QLabel(
-            "Ask a question about what is on your screen, or press Capture to have it explained.\n"
-            "Hotkeys still work anywhere: Alt+C analyze, hold Alt+V to ask by voice.",
-            self._content,
-        )
-        self.empty_label.setWordWrap(True)
-        self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.empty_label.setStyleSheet(f"color: {OVERLAY0}; font-size: 10.5pt; padding: 40px;")
+        self.empty_label = QWidget(self._content)
+        tips = QVBoxLayout(self.empty_label)
+        tips.setContentsMargins(0, 24, 0, 0)
+        tips.setSpacing(10)
+        welcome = QLabel("What would you like to know about your screen?", self.empty_label)
+        welcome.setWordWrap(True)
+        welcome.setStyleSheet(f"color: {TEXT}; font-size: 12pt; font-weight: 700;")
+        tips.addWidget(welcome)
+        for heading, body, color in (
+            ("Ask", "Type a question below and press Enter. Untick “Include my screen” to just chat.", BLUE),
+            ("Capture", "Press the Capture button, or Alt+C anywhere, to have the screen explained.", GREEN),
+            ("Speak", "Hold Alt+V and ask out loud, or use the Speak button. Tick “Speak answers” to hear replies.", PEACH),
+        ):
+            card = QFrame(self.empty_label)
+            card.setStyleSheet(
+                f"QFrame {{ background: {MANTLE}; border: 1px solid {SURFACE0}; border-left: 3px solid {color}; border-radius: 10px; }}"
+            )
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(14, 10, 14, 10)
+            card_layout.setSpacing(2)
+            head = QLabel(heading, card)
+            head.setStyleSheet(f"color: {color}; font-size: 10pt; font-weight: 700; border: none; background: transparent;")
+            text = QLabel(body, card)
+            text.setWordWrap(True)
+            text.setStyleSheet(f"color: {SUBTEXT}; font-size: 9.5pt; border: none; background: transparent;")
+            card_layout.addWidget(head)
+            card_layout.addWidget(text)
+            tips.addWidget(card)
         self._list.addWidget(self.empty_label)
         self._list.addStretch(1)
         self.scroll.setWidget(self._content)
@@ -263,24 +307,39 @@ class MainWindow(QWidget):
         ask_row.addWidget(self.send_button)
         root.addLayout(ask_row)
 
-        options = QHBoxLayout()
+        panel = QFrame(self)
+        panel.setObjectName("options")
+        panel.setStyleSheet(f"QFrame#options {{ background: {MANTLE}; border: 1px solid {SURFACE0}; border-radius: 12px; }}")
+        panel_layout = QVBoxLayout(panel)
+        panel_layout.setContentsMargins(12, 8, 12, 8)
+        panel_layout.setSpacing(6)
+
+        def section(caption: str, *widgets: QWidget) -> None:
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            label = QLabel(caption, panel)
+            label.setFixedWidth(100)
+            label.setStyleSheet(_CAPTION)
+            row.addWidget(label)
+            for widget in widgets:
+                row.addWidget(widget, 1 if isinstance(widget, QLabel) else 0)
+            row.addStretch(1)
+            panel_layout.addLayout(row)
+
         self.screen_check = QCheckBox("Include my screen", self)
         self.screen_check.setAccessibleName("Include screen")
         self.screen_check.setChecked(True)
         self.screen_check.setToolTip("Off: just chat, nothing is captured and no image is sent")
         self.screen_check.toggled.connect(self._screen_toggled)
-        options.addWidget(self.screen_check)
         self.memory_check = QCheckBox("Remember the conversation", self)
         self.memory_check.setAccessibleName("Remember")
         self.memory_check.setChecked(True)
         self.memory_check.setToolTip("Keeps the last few questions and answers (text only) so follow-ups make sense")
         self.memory_check.toggled.connect(self.memory_toggled)
-        options.addWidget(self.memory_check)
         self.speak_check = QCheckBox("Speak answers", self)
         self.speak_check.setAccessibleName("Speak")
         self.speak_check.setToolTip("Read the summary of each answer aloud with the Windows voice")
         self.speak_check.toggled.connect(self.speak_toggled)
-        options.addWidget(self.speak_check)
         self.search_check = QCheckBox("Search the web", self)
         self.search_check.setAccessibleName("Search web")
         self.search_check.setToolTip(
@@ -289,7 +348,6 @@ class MainWindow(QWidget):
             "used as a query, unless you also turn on Smart query and the cloud engine answers."
         )
         self.search_check.toggled.connect(self._search_changed)
-        options.addWidget(self.search_check)
         self.actions_check = QCheckBox("Allow running commands", self)
         self.actions_check.setAccessibleName("Allow running commands")
         self.actions_check.setToolTip(
@@ -297,7 +355,6 @@ class MainWindow(QWidget):
             "command and needs you to type RUN every time. Nothing ever runs by itself."
         )
         self.actions_check.toggled.connect(self.actions_toggled)
-        options.addWidget(self.actions_check)
         self.smart_check = QCheckBox("Smart query", self)
         self.smart_check.setAccessibleName("Smart query")
         self.smart_check.setEnabled(False)
@@ -307,15 +364,10 @@ class MainWindow(QWidget):
             "question, including the screen and your voice"
         )
         self.smart_check.toggled.connect(self.smart_toggled)
-        options.addWidget(self.smart_check)
-        options.addStretch(1)
         self.stop_speaking_button = _button("Stop voice", "Stop voice", tooltip="Stop reading the answer aloud (Esc does this too)")
         self.stop_speaking_button.clicked.connect(self.stop_speaking_clicked)
         self.stop_speaking_button.hide()
-        options.addWidget(self.stop_speaking_button)
-        root.addLayout(options)
 
-        watch_row = QHBoxLayout()
         self.watch_check = QCheckBox("Watch my screen", self)
         self.watch_check.setAccessibleName("Watch screen")
         self.watch_check.setToolTip(
@@ -323,18 +375,22 @@ class MainWindow(QWidget):
             "it for an error and tells you once. Needs a local engine. Nothing leaves this PC and nothing is saved."
         )
         self.watch_check.toggled.connect(self.watch_toggled)
-        watch_row.addWidget(self.watch_check)
         self.watch_pause_button = _button("Pause watching", "Pause watching", tooltip="Pause or resume watching (also in the tray menu)")
         self.watch_pause_button.clicked.connect(self.watch_pause_clicked)
         self.watch_pause_button.hide()
-        watch_row.addWidget(self.watch_pause_button)
         self.watch_label = QLabel("", self)
-        self.watch_label.setStyleSheet(f"color: {PEACH}; font-size: 9pt;")
+        self.watch_label.setStyleSheet(f"color: {PEACH}; font-size: 9pt; padding-left: 108px;")
+        self.watch_label.setWordWrap(True)
         self.watch_label.hide()
-        watch_row.addWidget(self.watch_label, 1)
-        root.addLayout(watch_row)
+
         for box in (self.screen_check, self.memory_check, self.speak_check, self.search_check, self.smart_check, self.watch_check, self.actions_check):
-            box.setStyleSheet(f"QCheckBox {{ color: {TEXT}; spacing: 6px; }}")
+            box.setStyleSheet(_CHIP)
+            box.setCursor(Qt.CursorShape.PointingHandCursor)
+        section("ASK", self.screen_check, self.memory_check)
+        section("EXTRAS", self.speak_check, self.search_check, self.smart_check, self.stop_speaking_button)
+        section("AUTOMATION", self.watch_check, self.actions_check, self.watch_pause_button)
+        panel_layout.addWidget(self.watch_label)
+        root.addWidget(panel)
 
         buttons = QHBoxLayout()
         self.capture_button = _button("Capture screen", "Capture", tooltip="Explain what is on the screen (same as Alt+C)")
