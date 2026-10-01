@@ -183,7 +183,7 @@ class FakeRecorder:
 def make_controller(qapp: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     controllers: list[Any] = []
 
-    def build(frames: list[Image.Image] | None = None, *, backend: str = "auto") -> tuple[Any, FakeMss]:
+    def build(frames: list[Image.Image] | None = None, *, backend: str = "auto", window: Any = None) -> tuple[Any, FakeMss]:
         MemorySettings.store = {}
         FakeWorker.instances = []
         FakeSpeaker.spoken, FakeSpeaker.stops = [], 0
@@ -213,7 +213,7 @@ def make_controller(qapp: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         monkeypatch.setattr(main, "probe", lambda: None)
         monkeypatch.setattr(main, "describe", lambda capability: "test pc")
         settings = main.ClientSettings(backend=backend, fallback_api_url=None)
-        controller = main.OmniSightController(qapp, settings, enable_hotkeys=False)
+        controller = main.OmniSightController(qapp, settings, enable_hotkeys=False, window=window)
         controllers.append(controller)
         return controller, fake
 
@@ -1645,3 +1645,23 @@ def test_a_status_pill_animation_that_ticks_after_its_widget_is_gone_does_not_ra
     sip.delete(pill)
     pill._on_color(QColor("#FF0000"))  # what a late animation tick calls; PyQt would abort the process on an exception here
     pill._on_pulse(0.5)
+
+
+def test_two_asks_sent_back_to_back_through_the_bridge_start_only_one_request(qapp: Any, make_controller: Any) -> None:
+    from ui.bridge import BridgeWindow
+
+    bridge = BridgeWindow("token")
+    controller, _ = make_controller(window=bridge)
+    FakeWorker.hold = True
+    bridge._command({"cmd": "ask", "text": "first"})
+    bridge._command({"cmd": "ask", "text": "second"})
+    bridge._command({"cmd": "capture"})
+    assert wait_until(lambda: len(FakeWorker.instances) == 1, TIMEOUT_S, pump(qapp))
+    wait_until(lambda: False, 0.3, pump(qapp))  # time for a second request to start, if one were going to
+    assert len(FakeWorker.instances) == 1
+    assert FakeWorker.instances[0].request.prompt == "first"
+    bridge._command({"cmd": "engine", "key": "local_gpu"})  # refused while the request runs: the engine did not change
+    assert controller.settings.engine_choice != "local_gpu"
+    FakeWorker.instances[0].release()
+    assert wait_until(lambda: not controller.state.is_busy, TIMEOUT_S, pump(qapp))
+    assert bridge.exchange_count == 1

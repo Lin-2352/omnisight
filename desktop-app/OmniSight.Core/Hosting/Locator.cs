@@ -6,6 +6,12 @@ public static class Locator
     public const string RootVariable = "OMNISIGHT_ROOT";
     public const string PythonVariable = "OMNISIGHT_PYTHON";
 
+    /// <summary>
+    /// Extra arguments for the Python client when the app starts it. Deliberately has no <c>--backend</c>: that flag beats the
+    /// engine the user saved, so passing it would quietly turn "This PC" (screenshots stay local) back into Auto.
+    /// </summary>
+    public static readonly IReadOnlyList<string> AppArguments = [];
+
     public static string? FindRepoRoot(string startDirectory, Func<string, string?>? env = null)
     {
         env ??= Environment.GetEnvironmentVariable;

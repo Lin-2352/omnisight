@@ -40,6 +40,13 @@ MAX_EXCHANGES: Final[int] = 30
 #: ``set`` command names that are plain switches, and the signal each one drives.
 SWITCHES: Final[tuple[str, ...]] = ("memory", "speak", "search", "smart", "watch", "actions")
 
+#: The window greyed these out while a request ran or a recording was in progress (``MainWindow._refresh_controls``);
+#: the bridge enforces the same rules, because a client can send a command whenever it likes.
+NEEDS_IDLE: Final[frozenset[str]] = frozenset({"ask", "capture", "engine", "clear"})
+NEEDS_IDLE_SWITCHES: Final[frozenset[str]] = frozenset({"search", "include_screen"})
+BUSY_STATES: Final[frozenset[AppState]] = frozenset({AppState.CAPTURING, AppState.ANALYZING})
+BUSY_MESSAGE: Final[str] = "OmniSight is busy: wait for the current answer to finish."
+
 
 class _TypedText:
     """Stands in for ``MainWindow.ask_box`` where the controller reads what was typed before a voice question."""
@@ -90,6 +97,7 @@ class BridgeWindow(QObject):
         self._auth_timer.timeout.connect(lambda: self._drop("no auth message in time"))
         self._sticky: dict[str, dict[str, Any]] = {}
         self._exchanges: list[dict[str, Any]] = []
+        self._state = AppState.IDLE
         self.ask_box = _TypedText()
         self.include_screen = True
         self.capture_excluded = False
@@ -216,9 +224,21 @@ class BridgeWindow(QObject):
         if handler is None:
             self._send({"event": "error", "message": f"unknown command {name!r}"})
             return
+        if self._refused_while_busy(name, message):
+            self._send({"event": "error", "message": BUSY_MESSAGE})
+            return
         problem = handler(message)
         if problem:
             self._send({"event": "error", "message": problem})
+
+    def _refused_while_busy(self, name: str, message: dict[str, Any]) -> bool:
+        busy = self._state in BUSY_STATES
+        idle = not busy and self._state is not AppState.RECORDING_VOICE
+        if name in NEEDS_IDLE or (name == "set" and message.get("name") in NEEDS_IDLE_SWITCHES):
+            return not idle
+        if name == "mic":  # "Speak" is also "Stop and send" while recording, so only a running request blocks it
+            return busy
+        return False
 
     def _cmd_ask(self, message: dict[str, Any]) -> str | None:
         text = message.get("text")
@@ -288,6 +308,7 @@ class BridgeWindow(QObject):
         self._emit({"event": "engine", "key": key}, sticky="engine")
 
     def set_app_state(self, state: AppState, message: str = "") -> None:
+        self._state = state
         self._emit({"event": "state", "state": state.value, "message": message}, sticky="state")
 
     def set_node_status(self, status: NodeStatus, engine_key: str) -> None:

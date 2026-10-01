@@ -123,6 +123,62 @@ public class LocatorTests
     }
 }
 
+public class LaunchTests
+{
+    [Fact]
+    public void The_app_never_passes_a_backend_so_the_saved_engine_choice_wins()
+    {
+        Assert.DoesNotContain(Locator.AppArguments, a => a.StartsWith("--backend", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Already_running_has_a_message_a_person_can_act_on()
+    {
+        var message = new AlreadyRunningException().Message;
+        Assert.Contains("already running", message);
+        Assert.Contains("tray", message);
+        Assert.Contains("Exit", message);
+    }
+
+    [Fact]
+    public void Descendants_finds_a_child_and_grandchild_but_not_unrelated_processes()
+    {
+        var info = new System.Diagnostics.ProcessStartInfo("cmd.exe", "/c ping -n 6 127.0.0.1 >nul") { CreateNoWindow = true, UseShellExecute = false };
+        using var parent = System.Diagnostics.Process.Start(info)!;
+        try
+        {
+            var found = new List<int>();
+            SpinWait.SpinUntil(() => (found = [.. ProcessJob.Descendants(parent.Id)]).Count > 0, TimeSpan.FromSeconds(5));
+            Assert.NotEmpty(found);
+            Assert.DoesNotContain(parent.Id, found);
+            Assert.DoesNotContain(Environment.ProcessId, found);
+        }
+        finally
+        {
+            parent.Kill(entireProcessTree: true);
+        }
+    }
+
+    [Fact]
+    public void Assigning_a_process_to_the_job_kills_it_with_the_job_but_leaves_this_process_out()
+    {
+        Assert.True(OperatingSystem.IsWindows());
+        var info = new System.Diagnostics.ProcessStartInfo("cmd.exe", "/c ping -n 30 127.0.0.1 >nul") { CreateNoWindow = true, UseShellExecute = false };
+        using var child = System.Diagnostics.Process.Start(info)!;
+        try
+        {
+            Assert.True(ProcessJob.Assign(child));
+            Assert.False(child.HasExited);
+            Assert.False(ProcessJob.Contains(System.Diagnostics.Process.GetCurrentProcess()), "the app/test process must not be in the kill-on-close job");
+            Assert.True(ProcessJob.Contains(child));
+        }
+        finally
+        {
+            child.Kill(entireProcessTree: true);
+        }
+    }
+}
+
 public class PythonHostProcessTests
 {
     private static string? RepoRoot() => Locator.FindRepoRoot(AppContext.BaseDirectory);
@@ -161,7 +217,7 @@ public class PythonHostProcessTests
                 new Dictionary<string, string> { ["QT_QPA_PLATFORM"] = "offscreen", ["FALLBACK_API_URL"] = "off" },
                 TimeSpan.FromSeconds(60)));
         }
-        catch (PythonHostException ex) when (ex.Message.Contains("exit 0"))
+        catch (AlreadyRunningException)
         {
             Skip.If(true, "another OmniSight client holds the single-instance lock");
             return;

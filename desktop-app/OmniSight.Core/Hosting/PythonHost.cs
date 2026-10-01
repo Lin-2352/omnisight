@@ -4,7 +4,12 @@ using System.Text.Json;
 
 namespace OmniSight.Core.Hosting;
 
-public sealed class PythonHostException(string message) : Exception(message);
+public class PythonHostException(string message) : Exception(message);
+
+/// <summary>The Qt app (or another OmniSight) already holds the single-instance lock, so the Python client exited at once with code 0.</summary>
+public sealed class AlreadyRunningException() : PythonHostException(
+    "OmniSight is already running (look for its icon in the system tray). Choose Exit there, then start this app again.");
+
 
 public sealed record PythonHostOptions(
     string RepoRoot,
@@ -83,7 +88,6 @@ public sealed class PythonHost : IAsyncDisposable
 
     public static async Task<PythonHost> StartAsync(PythonHostOptions options, CancellationToken ct = default)
     {
-        ProcessJob.AttachCurrentProcess();  // children inherit the job, so they die with this app however it ends
         var main = Path.Combine(options.RepoRoot, "desktop-client", "main.py");
         if (!File.Exists(main))
         {
@@ -122,6 +126,7 @@ public sealed class PythonHost : IAsyncDisposable
             throw new PythonHostException($"could not start Python ({options.PythonExe}): {ex.Message}");
         }
 
+        ProcessJob.Assign(process);  // only the Python client dies with this app; the app itself stays out of the job
         var token = NewToken();
         var tail = new Queue<string>();
         var tailLock = new object();
@@ -162,6 +167,11 @@ public sealed class PythonHost : IAsyncDisposable
                     lock (tailLock)
                     {
                         detail = string.Join(" | ", tail);
+                    }
+
+                    if (process.HasExited && process.ExitCode == 0)
+                    {
+                        throw new AlreadyRunningException();
                     }
 
                     throw new PythonHostException($"the Python client exited before it was ready (exit {(process.HasExited ? process.ExitCode : -1)}). {detail}".Trim());

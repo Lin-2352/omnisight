@@ -29,7 +29,7 @@ public partial class App : Application
         // Disposing the client makes the Python client exit; the job object kills it if it ever does not.
         try
         {
-            StopEngineAsync().Wait(TimeSpan.FromSeconds(8));
+            Task.Run(StopEngineAsync).Wait(TimeSpan.FromSeconds(8));  // off the UI thread: its continuations need the dispatcher we block here
         }
         catch (Exception)
         {
@@ -55,7 +55,7 @@ public partial class App : Application
 
         try
         {
-            _host = await PythonHost.StartAsync(new PythonHostOptions(root, Locator.FindPython(root), ["--backend", "auto"]));
+            _host = await PythonHost.StartAsync(new PythonHostOptions(root, Locator.FindPython(root), Locator.AppArguments));
             _client = new BridgeClient("127.0.0.1", _host.Port, _host.Token, Environment.ProcessId);
             _client.EventReceived += evt => Dispatcher.BeginInvoke(() => OnEvent(evt));
             _client.Disconnected += reason => Dispatcher.BeginInvoke(() => OnDisconnected(reason));
@@ -93,12 +93,12 @@ public partial class App : Application
         var host = Interlocked.Exchange(ref _host, null);
         if (client is not null)
         {
-            await client.DisposeAsync();
+            await client.DisposeAsync().ConfigureAwait(false);
         }
 
         if (host is not null)
         {
-            await host.DisposeAsync();
+            await host.DisposeAsync().ConfigureAwait(false);
         }
     }
 }
