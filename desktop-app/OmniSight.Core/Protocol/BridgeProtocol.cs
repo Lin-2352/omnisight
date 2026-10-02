@@ -51,6 +51,8 @@ public static class BridgeProtocol
                 "engines" => new EnginesEvent(Engines(root)),
                 "exchange" => ParseExchange(root),
                 "clear" => new ClearEvent(),
+                "bye" => new ByeEvent(),
+                "open_options" => new OpenOptionsEvent(),
                 "show" => new ShowEvent(),
                 "pong" => new PongEvent(),
                 "error" => new ErrorEvent(Str(root, "message")),

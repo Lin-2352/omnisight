@@ -1797,3 +1797,42 @@ def test_the_switch_must_be_on_and_the_text_a_terminal_command_for_the_bridge_to
     controller.on_run_requested("python", "print(1)")  # not a terminal command
     controller.on_run_requested("powershell", "   ")  # nothing to run
     assert opened == []
+
+
+def test_quitting_tells_the_app_so_its_window_can_close(qapp: Any, make_controller: Any) -> None:
+    from ui.bridge import BridgeWindow
+
+    bridge = BridgeWindow("token")
+    said: list[int] = []
+    bridge.say_goodbye = lambda: said.append(1)  # type: ignore[method-assign]
+    controller, _ = make_controller(window=bridge)
+    controller.shutdown()
+    assert said and said[0] == 1
+
+
+def test_the_qt_window_has_nobody_to_say_goodbye_to(qapp: Any, make_controller: Any) -> None:
+    controller, _ = make_controller()
+    controller._say_goodbye()  # no say_goodbye on the Qt window: nothing happens, nothing breaks
+
+
+def test_the_trays_settings_goes_to_the_app_and_never_opens_the_qt_dialog(qapp: Any, make_controller: Any) -> None:
+    from ui.bridge import BridgeWindow
+
+    bridge = BridgeWindow("token")
+    shown: list[int] = []
+    bridge.show_settings = lambda: shown.append(1)  # type: ignore[method-assign]
+    controller, _ = make_controller(window=bridge)
+    controller.open_settings()
+    assert shown == [1] and getattr(controller, "_settings_dialog", None) is None
+
+
+def test_a_second_instance_in_bridge_mode_exits_with_zero_and_shows_no_message_box(monkeypatch: pytest.MonkeyPatch) -> None:
+    import types
+
+    calls: list[Any] = []
+    monkeypatch.setattr(main.ctypes, "windll", types.SimpleNamespace(user32=types.SimpleNamespace(MessageBoxW=lambda *a: calls.append(a))), raising=False)
+    monkeypatch.setattr(main.SingleInstanceLock, "acquire", lambda self: False)
+    assert main.main(["--bridge", "--no-hotkeys"]) == 0
+    assert calls == [], "a program that started this one cannot click a message box"
+    assert main.main(["--no-hotkeys"]) == 0
+    assert len(calls) == 1, "the normal program still shows its message box"

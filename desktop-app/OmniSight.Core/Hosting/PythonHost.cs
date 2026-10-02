@@ -150,9 +150,16 @@ public sealed class PythonHost : IAsyncDisposable
 
         try
         {
-            await process.StandardInput.WriteLineAsync(token.AsMemory(), ct).ConfigureAwait(false);
-            await process.StandardInput.FlushAsync(ct).ConfigureAwait(false);
-            process.StandardInput.Close();
+            try
+            {
+                await process.StandardInput.WriteLineAsync(token.AsMemory(), ct).ConfigureAwait(false);
+                await process.StandardInput.FlushAsync(ct).ConfigureAwait(false);
+                process.StandardInput.Close();
+            }
+            catch (IOException)
+            {
+                // The child may already be gone (for example "already running"); the loop below finds out why from its exit.
+            }
 
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeout.CancelAfter(options.StartupTimeout ?? TimeSpan.FromSeconds(60));

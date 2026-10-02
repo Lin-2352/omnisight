@@ -155,6 +155,9 @@ public sealed partial class ShellViewModel : ObservableObject
     /// <summary>Raised when Python needs a yes or no. The window must show a dialog whose default answer is No.</summary>
     public event Action<ConfirmEvent>? ConfirmRequested;
 
+    /// <summary>Raised when the engine says it is quitting on purpose: the window should close.</summary>
+    public event Action? EngineQuit;
+
     /// <summary>Raised with an existing folder to open in Explorer (the log folder).</summary>
     public event Action<string>? OpenFolderRequested;
 
@@ -492,6 +495,12 @@ public sealed partial class ShellViewModel : ObservableObject
                 Conversation.Clear();
                 OnPropertyChanged(nameof(HasConversation));
                 break;
+            case ByeEvent:
+                EngineQuit?.Invoke();
+                break;
+            case OpenOptionsEvent:
+                IsPaneOpen = true;
+                break;
             case SwitchEvent s:
                 ApplySwitch(s);
                 break;
@@ -588,6 +597,8 @@ public sealed partial class ShellViewModel : ObservableObject
         SpeakingEvent s => $"speaking {(s.On ? "on" : "off")}",
         WatchEvent w => $"watch {(w.Text.Length == 0 ? "off" : w.Text)}{(w.Paused ? " (paused)" : "")}",
         ClearEvent => "conversation cleared",
+        ByeEvent => "engine is quitting",
+        OpenOptionsEvent => "open options",
         ShowEvent => "show window",
         PongEvent => "pong",
         UnknownEvent u => $"unknown event {u.Name}",

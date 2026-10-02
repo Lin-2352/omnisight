@@ -14,6 +14,12 @@ public sealed record SpeakAvailableEvent(bool Available) : BridgeEvent;
 public sealed record SpeakingEvent(bool On) : BridgeEvent;
 public sealed record WatchEvent(string Text, bool Paused) : BridgeEvent;
 public sealed record ClearEvent : BridgeEvent;
+
+/// <summary>The engine is quitting on purpose (the tray's Exit): the window should close rather than look crashed.</summary>
+public sealed record ByeEvent : BridgeEvent;
+
+/// <summary>The tray's Settings: open the options pane.</summary>
+public sealed record OpenOptionsEvent : BridgeEvent;
 public sealed record ShowEvent : BridgeEvent;
 public sealed record PongEvent : BridgeEvent;
 public sealed record ErrorEvent(string Message) : BridgeEvent;

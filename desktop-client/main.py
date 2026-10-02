@@ -202,10 +202,12 @@ class SingleInstanceLock:
             self._socket = None
 
 
-def notify_already_running() -> None:
+def notify_already_running(modal: bool = True) -> None:
+    """Say so on stderr and, unless ``modal`` is False, in a message box. A program that started this one (the C# app) must never
+    be left waiting for someone to click a box it cannot see: it reads the exit code (0) and the stderr line instead."""
     message = "OmniSight is already running.\n\nUse its tray icon, or press Alt+C to analyze the screen."
     print(message.replace("\n\n", " "), file=sys.stderr)
-    if os.name == "nt":
+    if modal and os.name == "nt":
         try:
             ctypes.windll.user32.MessageBoxW(None, message, "OmniSight", 0x40 | 0x10000)  # MB_ICONINFORMATION | MB_SETFOREGROUND
         except (AttributeError, OSError):
@@ -737,6 +739,10 @@ class OmniSightController(QObject):
         self.tray.showMessage("OmniSight", "History cleared.", QSystemTrayIcon.MessageIcon.Information, 2000)
 
     def open_settings(self) -> None:
+        show = getattr(self.window, "show_settings", None)
+        if show is not None:  # the C# app has its own settings page
+            show()
+            return
         self._settings_dialog = SettingsDialog(self)
         self._settings_dialog.show()
         self._settings_dialog.raise_()
@@ -1458,8 +1464,15 @@ class OmniSightController(QObject):
 
     # -- shutdown -----------------------------------------------------------------
 
+    def _say_goodbye(self) -> None:
+        """A deliberate quit (the tray's Exit): an external UI is told, so it can close instead of showing a dead engine."""
+        goodbye = getattr(self.window, "say_goodbye", None)
+        if goodbye is not None:
+            goodbye()
+
     def shutdown(self) -> None:
         logger.info("shutting down")
+        self._say_goodbye()
         self._foreground_timer.stop()
         self._node_timer.stop()
         self._speaking_timer.stop()
@@ -1593,7 +1606,7 @@ def main(argv: list[str] | None = None) -> int:
     lock = SingleInstanceLock()
     if not lock.acquire():
         logger.info("another instance is running; exiting")
-        notify_already_running()
+        notify_already_running(modal=not args.bridge)
         return 0
     logger.info("single-instance lock: %s", lock.mechanism)
 

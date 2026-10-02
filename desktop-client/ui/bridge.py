@@ -378,6 +378,16 @@ class BridgeWindow(QObject):
     def show(self) -> None:
         self._emit({"event": "show"})
 
+    def show_settings(self) -> None:
+        """The tray's Settings: open the app's own options pane (never the Qt dialog)."""
+        self._send({"event": "open_options"})
+
+    def say_goodbye(self) -> None:
+        """The engine is quitting on purpose (tray Exit): tell the app, and give the bytes a moment to leave."""
+        self._send({"event": "bye"})
+        if self._client is not None and self._authed:
+            self._client.waitForBytesWritten(300)
+
     def raise_(self) -> None:
         return None
 

@@ -93,3 +93,44 @@ def test_bridge_mode_end_to_end() -> None:
         for stream in (proc.stdin, proc.stdout, proc.stderr):
             if stream:
                 stream.close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the Windows client")
+def test_a_second_bridge_instance_exits_at_once_with_zero_and_no_message_box() -> None:
+    first = _start()
+    second: subprocess.Popen[str] | None = None
+    try:
+        assert first.stdin is not None and first.stdout is not None
+        first.stdin.write(TOKEN + "\n")
+        first.stdin.flush()
+        deadline = time.monotonic() + 30
+        announce = ""
+        while time.monotonic() < deadline:
+            announce = first.stdout.readline()
+            if announce.startswith("OMNISIGHT_BRIDGE") or first.poll() is not None:
+                break
+        if not announce.startswith("OMNISIGHT_BRIDGE"):
+            if first.poll() == 0:
+                pytest.skip("another OmniSight client holds the single-instance lock")
+            pytest.fail("the first instance did not start")
+        second = _start()
+        assert second.stdin is not None
+        try:
+            second.stdin.write("another-token\n")
+            second.stdin.flush()
+        except OSError:
+            pass  # it may already have exited: that is the point
+        # a modal message box would keep it alive: it must be gone in seconds, with exit code 0 and its reason on stderr
+        code = second.wait(timeout=25)
+        assert code == 0
+        assert "already running" in (second.stderr.read() if second.stderr else "")
+    finally:
+        for process in (second, first):
+            if process is not None and process.poll() is None:
+                process.kill()
+        for process in (second, first):
+            if process is not None:
+                process.wait(timeout=10)
+                for stream in (process.stdin, process.stdout, process.stderr):
+                    if stream:
+                        stream.close()

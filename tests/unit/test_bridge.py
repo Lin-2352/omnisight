@@ -603,3 +603,23 @@ def test_settings_info_and_results_reach_the_app_and_info_is_replayed(qapp: Any,
     assert peer.wait_for("settings_info")["local_url"] == "http://127.0.0.1:8000"
     bridge.set_settings_result("Saved for this session.")
     assert peer.wait_for("settings_result")["text"] == "Saved for this session."
+
+
+# -- a deliberate quit and the tray's Settings ----------------------------------------------------------------------
+
+
+def test_goodbye_reaches_the_app_before_the_engine_quits(qapp: Any, bridge: BridgeWindow) -> None:
+    peer = connect(qapp, bridge)
+    bridge.say_goodbye()
+    peer.wait_for("bye")
+
+
+def test_goodbye_and_settings_are_harmless_with_nobody_connected(bridge: BridgeWindow) -> None:
+    bridge.say_goodbye()
+    bridge.show_settings()
+
+
+def test_the_trays_settings_opens_the_apps_own_page(qapp: Any, bridge: BridgeWindow) -> None:
+    peer = connect(qapp, bridge)
+    bridge.show_settings()
+    peer.wait_for("open_options")

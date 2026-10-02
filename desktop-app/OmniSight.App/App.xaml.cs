@@ -33,6 +33,11 @@ public partial class App : Application
             args.SetObserved();
         };
         _viewModel.CommandRequested += OnCommand;
+        _viewModel.EngineQuit += () => Dispatcher.BeginInvoke(() =>
+        {
+            AppLog.Info("the engine is quitting on purpose; closing the window");
+            Shutdown();
+        });
         _window = new MainWindow(_viewModel, StartEngineAsync);
         MainWindow = _window;
         ApplyTheme();
@@ -114,9 +119,10 @@ public partial class App : Application
             _client.Disconnected += reason => Dispatcher.BeginInvoke(() => OnDisconnected(reason));
             await _client.ConnectAsync();
         }
-        catch (Exception ex) when (ex is PythonHostException or BridgeException)
+        catch (Exception ex)
         {
-            var detail = _host?.Diagnostics;
+            // Whatever went wrong, the window must say so and offer Restart: never stay on "Starting…" for ever.
+            var detail = ex is PythonHostException or BridgeException ? _host?.Diagnostics : null;
             AppLog.Error("could not start or reach the engine", ex);
             _viewModel.SetFailed(string.IsNullOrWhiteSpace(detail) ? ex.Message : $"{ex.Message}  {detail}");
             await StopEngineAsync();
@@ -126,7 +132,7 @@ public partial class App : Application
     private void OnEvent(BridgeEvent evt)
     {
         _viewModel.Apply(evt);
-        if (evt is ShowEvent && _window is not null)
+        if (evt is ShowEvent or OpenOptionsEvent && _window is not null)
         {
             _window.WindowState = WindowState.Normal;
             _window.Activate();
