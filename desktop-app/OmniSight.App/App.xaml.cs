@@ -35,9 +35,26 @@ public partial class App : Application
         _viewModel.CommandRequested += OnCommand;
         _window = new MainWindow(_viewModel, StartEngineAsync);
         MainWindow = _window;
-        ApplicationThemeManager.ApplySystemTheme();
+        ApplyTheme();
         _window.Show();
         await StartEngineAsync();
+    }
+
+    /// <summary>Follows the Windows theme. <c>OMNISIGHT_THEME=light</c> or <c>dark</c> forces one (for checking the design).</summary>
+    private static void ApplyTheme()
+    {
+        switch (Environment.GetEnvironmentVariable("OMNISIGHT_THEME")?.Trim().ToLowerInvariant())
+        {
+            case "light":
+                ApplicationThemeManager.Apply(ApplicationTheme.Light);
+                break;
+            case "dark":
+                ApplicationThemeManager.Apply(ApplicationTheme.Dark);
+                break;
+            default:
+                ApplicationThemeManager.ApplySystemTheme();
+                break;
+        }
     }
 
     protected override void OnExit(ExitEventArgs e)

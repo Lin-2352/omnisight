@@ -215,6 +215,8 @@ Screenshots are never written to disk. They are held in memory only while a ques
 | Watch mode says it needs a local engine | Pick **This PC: GPU** (or CPU or automatic) first |
 | Nothing happens when I press `Alt+C` | Another program may use that key. Check that OmniSight is running in the tray |
 | Run button is missing | Tick **Allow running commands**; only answers with a terminal command show it |
+| "OmniSight is already running" in the new app | The older window is open. Choose **Exit** from its tray icon, then start the new app again |
+| The new app says the engine stopped | Press **Restart engine**. If it keeps happening, open **Options**, then **Open logs**, and look at `app.log` and `client.log` |
 
 ---
 
@@ -228,7 +230,33 @@ Screenshots are never written to disk. They are held in memory only while a ques
 
 ---
 
-## 15. Questions and answers
+## 15. The new Windows app (preview)
+
+There is a second, more modern window for OmniSight, built with .NET. It does exactly the same things and uses the same engine, so everything in this guide still applies. Only the look and a few controls are different.
+
+**How to start it** (you need the .NET 10 SDK, and the setup from section 2 done once):
+
+```powershell
+dotnet run --project desktop-app\OmniSight.App
+```
+
+Or build a single file you can double-click: `dotnet publish desktop-app\OmniSight.App -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -o desktop-app\publish` (it needs the .NET 10 Desktop Runtime to run).
+
+**What is different**
+
+- **Options** (top right) opens a side panel with every switch (Remember, Speak answers, Search the web, Smart query, Watch my screen, Allow running commands) and your Settings (override address, local node address, test connection, open logs).
+- **Allow running commands** asks its question inside the window. The default answer is **Cancel**.
+- **Run...** opens an approval card inside the window. It shows the exact command and the working folder. **Run command** stays off until you type `RUN`, exactly like that, every time. Commands that are always refused cannot be run at all. **Esc** stops a running command or closes the card, and **Enter** never runs anything.
+- The window follows your Windows light or dark theme.
+- The window hides itself from screen capture, so OmniSight never reads its own answers.
+- **Alt+C**, **Alt+V** and the tray icon still come from the older program, so the quick answer box they show looks like the older design. Both windows cannot run at the same time: if you see "OmniSight is already running", close the other one from its tray icon first.
+- Its own small log is `%APPDATA%\OmniSight\logs\app.log` (next to `client.log`). It never contains your questions or screenshots.
+
+More for developers is in [desktop-app/README.md](../desktop-app/README.md).
+
+---
+
+## 16. Questions and answers
 
 **Is anything recorded all the time?** No. OmniSight looks at your screen only when you ask, or (if you turn it on, with a local engine) while Watch is on.
 

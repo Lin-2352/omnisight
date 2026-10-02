@@ -18,11 +18,16 @@ python desktop-client\main.py
 2. Type a question and press Enter, or press `Alt+C` anywhere to explain the screen.
 3. Pick **This PC** in the Engine menu to keep every screenshot on your computer.
 
+## A newer window (preview)
+
+`dotnet run --project desktop-app\OmniSight.App` starts a modern Fluent-style window (WPF) on the same engine: answer cards, an options panel, an in-window approval for running commands, and light and dark themes. See [desktop-app/README.md](desktop-app/README.md).
+
 ## What is in this repository
 
 | Folder | What it is |
 | --- | --- |
-| [`desktop-client/`](desktop-client/README.md) | The Windows app: window, floating box, hotkeys, tray |
+| [`desktop-client/`](desktop-client/README.md) | The Windows engine and the original window: capture, hotkeys, tray, search, watch, safe commands |
+| [`desktop-app/`](desktop-app/README.md) | The newer C# window (WPF) that drives the same engine |
 | [`kaggle-server/`](kaggle-server/README.md) | The model server that runs on a free Kaggle GPU (also runs on your PC) |
 | [`web-showcase/`](web-showcase/README.md) | The website and its online backup, hosted on Vercel |
 | [`shared/`](shared) | The request and answer format all three parts agree on |
