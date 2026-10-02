@@ -52,3 +52,13 @@
 
 # Generated JSON Schemas: collapse in PR diffs
 shared/schema/*.schema.json linguist-generated=true
+
+# the C# app: LF everywhere, so git never warns about converting line endings
+desktop-app/** text eol=lf
+*.sln text eol=lf
+*.csproj text eol=lf
+*.props text eol=lf
+*.xaml text eol=lf
+*.cs text eol=lf
+*.ico binary
+*.png binary
