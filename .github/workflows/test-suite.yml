@@ -97,3 +97,17 @@ jobs:
       - name: End-to-end failover against next start
         timeout-minutes: 3
         run: npm run test:e2e
+
+  desktop-app:
+    name: C# app (build with warnings as errors, xUnit)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Build
+        run: dotnet build desktop-app -warnaserror
+      - name: Test (the real-Python test skips itself: no .venv here)
+        run: dotnet test desktop-app --no-build
