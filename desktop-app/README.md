@@ -41,8 +41,8 @@ One 7 MB `OmniSight.App.exe` (needs the .NET 10 Desktop Runtime). It finds the r
 ## Build and test
 
 ```powershell
-dotnet build desktop-app -warnaserror
-dotnet test desktop-app
+dotnet build -warnaserror
+dotnet test
 ```
 
 The tests include a real Python client started in bridge mode. They are skipped when there is no `.venv` or when another OmniSight client is running.
