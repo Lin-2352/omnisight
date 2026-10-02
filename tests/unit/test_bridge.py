@@ -24,8 +24,10 @@ class Peer:
     def __init__(self, qapp: Any, port: int) -> None:
         self.qapp = qapp
         self.socket = QTcpSocket()
+        self.was_connected = False
+        self.socket.connected.connect(lambda: setattr(self, "was_connected", True))  # a rejected client is closed at once: polling the state can miss it
         self.socket.connectToHost(QHostAddress.SpecialAddress.LocalHost, port)
-        assert wait_until(lambda: self.socket.state() == QAbstractSocket.SocketState.ConnectedState, 20, self.pump)
+        assert wait_until(lambda: self.was_connected, 20, self.pump)
         self.buffer = b""
         self.events: list[dict[str, Any]] = []
 
