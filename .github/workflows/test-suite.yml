@@ -109,5 +109,5 @@ jobs:
           dotnet-version: 10.0.x
       - name: Build
         run: dotnet build desktop-app -warnaserror
-      - name: Test (the real-Python test skips itself: no .venv here)
+      - name: "Test (the real-Python test skips itself, there is no .venv here)"
         run: dotnet test desktop-app --no-build
