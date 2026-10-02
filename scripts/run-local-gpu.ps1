@@ -65,11 +65,14 @@ if (-not (Test-Path $Python)) {
 
 # --- Pick the device (same rules as the desktop client's capability report) ---------------
 if ($Device -eq "auto") {
-    $Device = (& $Python (Join-Path $Root "scripts\capability_report.py") --device).Trim()
-    if ($Device -eq "none") {
+    # Not assigned straight to $Device: that parameter is validated ("auto", "cuda", "cpu"), so storing "none" in it would
+    # fail with a cryptic validation error instead of the explanation below.
+    $picked = (& $Python (Join-Path $Root "scripts\capability_report.py") --device).Trim()
+    if ($picked -eq "none") {
         & $Python (Join-Path $Root "scripts\capability_report.py")
-        throw "This PC has neither enough free VRAM nor enough free RAM for a local model; use the Kaggle backend."
+        throw "Not enough free GPU memory or RAM for a local model. Close other programs or use the Kaggle backend."
     }
+    $Device = $picked
     Write-Step "Auto-selected device: $Device"
 }
 if ($Device -eq "cpu" -and $Model -eq "7b") {

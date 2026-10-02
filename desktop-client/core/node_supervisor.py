@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import re
 import subprocess
 import threading
 import time
@@ -355,9 +356,16 @@ class NodeSupervisor:
                 return line[3:].strip()
         return ""
 
+    #: PowerShell prints an error as its message and then an error record ("At file:line char:n", "+ ..." code excerpts,
+    #: CategoryInfo, FullyQualifiedErrorId, some of it wrapped onto indented lines). Only the message helps a person.
+    _ERROR_RECORD_START = re.compile(r"^\s*At .+:\d+ char:\d+\s*$")
+
     def _tail(self, count: int = 3) -> str:
-        lines = [line for line in self._log if "Warning" not in line][-count:]
-        return " | ".join(lines)
+        lines = [line for line in self._log if "Warning" not in line]
+        for index, line in enumerate(lines):
+            if index > 0 and self._ERROR_RECORD_START.match(line):
+                return lines[index - 1].strip()  # the message PowerShell printed just before its error record
+        return " | ".join(lines[-count:])
 
     def _refresh_starting(self, status: NodeStatus) -> None:
         process = self._process

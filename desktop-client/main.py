@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import dataclasses
+import json
 import os
 import signal
 import socket
@@ -122,7 +123,9 @@ from PyQt6.QtWidgets import (  # noqa: E402
     QPushButton,
     QSystemTrayIcon,
     QVBoxLayout,
+    QWidget,
 )
+from ui.bridge import BridgeWindow  # noqa: E402
 from ui.components import BASE, BLUE, GREEN, SURFACE0, TEXT  # noqa: E402
 from ui.hud import HudWindow  # noqa: E402
 from ui.main_window import MainWindow  # noqa: E402
@@ -199,10 +202,12 @@ class SingleInstanceLock:
             self._socket = None
 
 
-def notify_already_running() -> None:
+def notify_already_running(modal: bool = True) -> None:
+    """Say so on stderr and, unless ``modal`` is False, in a message box. A program that started this one (the C# app) must never
+    be left waiting for someone to click a box it cannot see: it reads the exit code (0) and the stderr line instead."""
     message = "OmniSight is already running.\n\nUse its tray icon, or press Alt+C to analyze the screen."
     print(message.replace("\n\n", " "), file=sys.stderr)
-    if os.name == "nt":
+    if modal and os.name == "nt":
         try:
             ctypes.windll.user32.MessageBoxW(None, message, "OmniSight", 0x40 | 0x10000)  # MB_ICONINFORMATION | MB_SETFOREGROUND
         except (AttributeError, OSError):
@@ -462,6 +467,27 @@ class SettingsDialog(QDialog):
 # ---------------------------------------------------------------------------
 
 
+class _Pending:
+    """Marks "a question is open" (so a second one is not asked) when the app, not a Qt box, will answer it."""
+
+
+class EndpointInfoWorker(QThread):
+    """Looks up which endpoint is active for a settings page (the lookup can take a network round trip)."""
+
+    finished_with = pyqtSignal(str)
+
+    def __init__(self, resolver: EndpointResolver) -> None:
+        super().__init__()
+        self._resolver = resolver
+
+    def run(self) -> None:
+        try:
+            resolution = self._resolver.resolve_active_endpoint(force_refresh=True)
+            self.finished_with.emit(f"{resolution.url or 'none'}  ({resolution.source}; {resolution.detail})")
+        except (OSError, ValueError) as exc:
+            self.finished_with.emit(f"unknown ({type(exc).__name__}: {exc})")
+
+
 class SearchWorker(QThread):
     """Runs one web search (and the optional smart-query rewrite) off the GUI thread."""
 
@@ -488,7 +514,7 @@ class SearchWorker(QThread):
 
 
 class OmniSightController(QObject):
-    def __init__(self, app: QApplication, settings: ClientSettings, enable_hotkeys: bool = True) -> None:
+    def __init__(self, app: QApplication, settings: ClientSettings, enable_hotkeys: bool = True, window: Any | None = None) -> None:
         super().__init__()
         self.app = app
         self.settings = settings
@@ -497,7 +523,7 @@ class OmniSightController(QObject):
         self.capturer = ScreenCapturer()
         self.recorder = AudioRecorder()
         self.hud = HudWindow()
-        self.window = MainWindow()
+        self.window = window if window is not None else MainWindow()  # a BridgeWindow when the C# app is the UI
         self.foreground = ForegroundTracker()
         self.node = NodeSupervisor(repo_root(), settings.local_dev_url)
         saved = QSettings()
@@ -508,8 +534,9 @@ class OmniSightController(QObject):
         self._actions_enabled = bool(saved.value("actions_enabled", False, type=bool))
         self._actions_cwd = Path(str(saved.value("actions_cwd", str(Path.home()))))
         self._action_dialog_open = False  # while it is open (and its output on screen) watch must not look at the screen
-        self._run_dialog: RunDialog | None = None
-        self._allow_box: QMessageBox | None = None
+        self._run_dialog: Any = None  # a RunDialog, or a BridgeRunSession when the C# app is the UI
+        self._allow_box: QMessageBox | _Pending | None = None
+        self._info_workers: list[QThread] = []
         self._search_enabled = bool(saved.value("web_search", False, type=bool))
         self._smart_enabled = bool(saved.value("smart_query", False, type=bool)) and self._search_enabled
         self.watch = WatchScheduler(_watch_interval())
@@ -560,6 +587,11 @@ class OmniSightController(QObject):
         self.window.run_requested.connect(self.on_run_requested)
         self.window.watch_pause_clicked.connect(self.toggle_watch_pause)
         self.window.smart_toggled.connect(self.set_smart_enabled)
+        if hasattr(self.window, "peer_pid"):
+            self.window.peer_pid.connect(self.foreground.add_own_pid)
+            self.window.settings_info_requested.connect(self.publish_settings_info)
+            self.window.settings_apply_requested.connect(self.apply_settings)
+            self.window.connection_test_requested.connect(self.run_connection_test)
         self.window.set_engine(self.settings.engine_choice)
         self.window.set_memory_enabled(self.memory.enabled)
         self.window.set_speak_available(self.speaker.available)
@@ -648,6 +680,10 @@ class OmniSightController(QObject):
         if reason in (QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick):
             self.open_window()
 
+    def _window_widget(self) -> QWidget | None:
+        """The window as a dialog parent: ``None`` when the UI is not a Qt widget (the bridge)."""
+        return self.window if isinstance(self.window, QWidget) else None
+
     def open_window(self) -> None:
         self.window.show()
         self.window.raise_()
@@ -703,9 +739,66 @@ class OmniSightController(QObject):
         self.tray.showMessage("OmniSight", "History cleared.", QSystemTrayIcon.MessageIcon.Information, 2000)
 
     def open_settings(self) -> None:
+        show = getattr(self.window, "show_settings", None)
+        if show is not None:  # the C# app has its own settings page
+            show()
+            return
         self._settings_dialog = SettingsDialog(self)
         self._settings_dialog.show()
         self._settings_dialog.raise_()
+
+    # -- settings for an external UI (the Qt window has its own dialog) --------------------------------------
+
+    def _settings_info(self, endpoint: str) -> dict[str, Any]:
+        return {
+            "endpoint": endpoint,
+            "override_url": self.settings.manual_override_url or "",
+            "local_url": self.settings.local_dev_url,
+            "capability": self.capability_line,
+            "fallback_url": self.settings.fallback_api_url or "",
+            "hotkeys": "Alt+C analyze   ·   hold Alt+V voice   ·   Esc hide",
+            "log_dir": str(default_log_dir()),
+        }
+
+    def publish_settings_info(self) -> None:
+        """Tell the app what its settings page shows; the active endpoint is looked up off this thread (it can touch the network)."""
+        send = getattr(self.window, "set_settings_info", None)
+        if send is None:
+            return
+        send(self._settings_info("checking…"))
+        worker = EndpointInfoWorker(self.resolver)
+        self._info_workers.append(worker)
+
+        def done(text: str) -> None:
+            send(self._settings_info(text))
+
+        worker.finished_with.connect(done)
+        worker.finished.connect(lambda w=worker: self._info_workers.remove(w) if w in self._info_workers else None)
+        worker.start()
+
+    def apply_settings(self, override: str, local_url: str) -> None:
+        result = getattr(self.window, "set_settings_result", None)
+        try:
+            self.set_override(override)
+            self.set_local_url(local_url)
+        except ValueError as exc:
+            if result is not None:
+                result(str(exc))
+            return
+        if result is not None:
+            result("Saved for this session.")
+        self.publish_settings_info()
+
+    def run_connection_test(self) -> None:
+        result = getattr(self.window, "set_settings_result", None)
+        if result is None:
+            return
+        result("Checking…")
+        worker = HealthCheckWorker(self.settings, self.resolver)
+        self._info_workers.append(worker)
+        worker.finished_with.connect(result)
+        worker.finished.connect(lambda w=worker: self._info_workers.remove(w) if w in self._info_workers else None)
+        worker.start()
 
     def set_override(self, url: str) -> None:
         self.settings = self.settings.with_override(url)
@@ -863,7 +956,7 @@ class OmniSightController(QObject):
             ALLOW_ACTIONS_TITLE,
             ALLOW_ACTIONS_TEXT,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            self.window,
+            self._window_widget(),
         )
         box.setDefaultButton(QMessageBox.StandardButton.No)
         box.setEscapeButton(QMessageBox.StandardButton.No)
@@ -871,6 +964,16 @@ class OmniSightController(QObject):
         return box
 
     def _ask_allow_actions(self, on_answer: Callable[[bool], None]) -> None:
+        ask = getattr(self.window, "ask_allow_actions", None)
+        if ask is not None:  # the C# app asks in its own window; the answer is No if it cannot be reached
+            self._allow_box = _Pending()
+
+            def answered(yes: bool) -> None:
+                self._allow_box = None
+                on_answer(yes)
+
+            ask(ALLOW_ACTIONS_TITLE, ALLOW_ACTIONS_TEXT, answered)
+            return
         box = self._build_allow_box()
         self._allow_box = box
 
@@ -891,11 +994,18 @@ class OmniSightController(QObject):
         """
         if not self._actions_enabled or not is_shell_language(language) or not command.strip() or self._run_dialog is not None:
             return
-        dialog = RunDialog(command, language, self.actions, self._actions_cwd, parent=self.window)
+        opener = getattr(self.window, "open_run_session", None)
+        if opener is not None:  # the C# app shows the approval; it can only open it when it is connected
+            dialog: Any = opener(command, language, self.actions, self._actions_cwd)
+            if dialog is None:
+                return
+        else:
+            dialog = RunDialog(command, language, self.actions, self._actions_cwd, parent=self._window_widget())
         self._run_dialog = dialog
         self._action_dialog_open = True
         dialog.finished.connect(self._on_run_dialog_closed)
-        dialog.open()
+        if opener is None:
+            dialog.open()
 
     def _on_run_dialog_closed(self, _result: int) -> None:
         dialog, self._run_dialog = self._run_dialog, None
@@ -1093,7 +1203,7 @@ class OmniSightController(QObject):
         self.tray.showMessage("OmniSight noticed something", finding, QSystemTrayIcon.MessageIcon.Warning, 10000)
         # An unprompted card never offers "Copy Fix" / "Copy Terminal Command" for code the model read off the screen.
         plain = result.model_copy(update={"response": result.response.model_copy(update={"code_blocks": []})})
-        self.window.add_exchange("Noticed while watching", plain)
+        self.window.add_exchange("Noticed while watching", plain, origin="watch")
 
     # -- web search ------------------------------------------------------------------------------------
 
@@ -1354,8 +1464,15 @@ class OmniSightController(QObject):
 
     # -- shutdown -----------------------------------------------------------------
 
+    def _say_goodbye(self) -> None:
+        """A deliberate quit (the tray's Exit): an external UI is told, so it can close instead of showing a dead engine."""
+        goodbye = getattr(self.window, "say_goodbye", None)
+        if goodbye is not None:
+            goodbye()
+
     def shutdown(self) -> None:
         logger.info("shutting down")
+        self._say_goodbye()
         self._foreground_timer.stop()
         self._node_timer.stop()
         self._speaking_timer.stop()
@@ -1445,6 +1562,27 @@ class _WarmUp(QRunnable):
             logger.warning("capability probe failed: %s", exc)
 
 
+BRIDGE_CONNECT_TIMEOUT_MS: Final[int] = 60_000
+
+
+def start_bridge(app: QApplication) -> BridgeWindow | None:
+    """Listen for the C# app: token from the first stdin line, port announced on stdout, exit when the app goes away."""
+    token = sys.stdin.readline().strip()
+    if not token:
+        print("bridge: no token on stdin", file=sys.stderr)
+        return None
+    bridge = BridgeWindow(token)
+    try:
+        port = bridge.listen()
+    except OSError as exc:
+        print(f"bridge: {exc}", file=sys.stderr)
+        return None
+    bridge.connected_changed.connect(lambda up: app.quit() if not up else None)  # the app owns this process
+    QTimer.singleShot(BRIDGE_CONNECT_TIMEOUT_MS, lambda: app.quit() if not bridge.connected else None)
+    print("OMNISIGHT_BRIDGE " + json.dumps({"port": port, "protocol": 1}), flush=True)
+    return bridge
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="OmniSight desktop client")
     parser.add_argument("--override-url", help="talk to this node instead of discovering it from the gist")
@@ -1452,6 +1590,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-hotkeys", action="store_true", help="do not install the global keyboard hook")
     parser.add_argument("--backend", choices=tuple(BACKENDS), help="auto, kaggle or local (overrides the saved choice)")
     parser.add_argument("--tray-only", action="store_true", help="start in the tray without opening the window")
+    parser.add_argument("--bridge", action="store_true", help="no Qt window: serve the C# app over a loopback socket (token on stdin)")
     args = parser.parse_args(argv)
 
     try:
@@ -1467,7 +1606,7 @@ def main(argv: list[str] | None = None) -> int:
     lock = SingleInstanceLock()
     if not lock.acquire():
         logger.info("another instance is running; exiting")
-        notify_already_running()
+        notify_already_running(modal=not args.bridge)
         return 0
     logger.info("single-instance lock: %s", lock.mechanism)
 
@@ -1497,9 +1636,15 @@ def main(argv: list[str] | None = None) -> int:
     if not QSystemTrayIcon.isSystemTrayAvailable():
         logger.warning("system tray unavailable; use the hotkeys")
 
-    controller = OmniSightController(app, settings, enable_hotkeys=not args.no_hotkeys)
+    bridge: BridgeWindow | None = None
+    if args.bridge:
+        bridge = start_bridge(app)
+        if bridge is None:
+            lock.release()
+            return 2
+    controller = OmniSightController(app, settings, enable_hotkeys=not args.no_hotkeys, window=bridge)
     app.aboutToQuit.connect(controller.shutdown)
-    if not args.tray_only:
+    if bridge is None and not args.tray_only:
         controller.open_window()
 
     signal.signal(signal.SIGINT, lambda *_: app.quit())

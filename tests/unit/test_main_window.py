@@ -183,7 +183,7 @@ class FakeRecorder:
 def make_controller(qapp: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     controllers: list[Any] = []
 
-    def build(frames: list[Image.Image] | None = None, *, backend: str = "auto") -> tuple[Any, FakeMss]:
+    def build(frames: list[Image.Image] | None = None, *, backend: str = "auto", window: Any = None) -> tuple[Any, FakeMss]:
         MemorySettings.store = {}
         FakeWorker.instances = []
         FakeSpeaker.spoken, FakeSpeaker.stops = [], 0
@@ -213,7 +213,7 @@ def make_controller(qapp: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         monkeypatch.setattr(main, "probe", lambda: None)
         monkeypatch.setattr(main, "describe", lambda capability: "test pc")
         settings = main.ClientSettings(backend=backend, fallback_api_url=None)
-        controller = main.OmniSightController(qapp, settings, enable_hotkeys=False)
+        controller = main.OmniSightController(qapp, settings, enable_hotkeys=False, window=window)
         controllers.append(controller)
         return controller, fake
 
@@ -1315,11 +1315,15 @@ def test_the_gpu_engine_gets_no_cpu_warning(qapp: Any, watching: Any) -> None:
 def test_an_unprompted_alert_card_offers_no_code_to_copy(qapp: Any, watching: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     controller, fake, clock, tray = watching()
     shown: list[Any] = []
-    monkeypatch.setattr(controller.window, "add_exchange", lambda question, result, searched="": shown.append(result))
+    origins: list[str] = []
+    monkeypatch.setattr(
+        controller.window, "add_exchange", lambda question, result, searched="", note="", origin="window": (shown.append(result), origins.append(origin))
+    )
     response = AnalyzeResponse.model_validate(analyze_response_json())
     assert response.code_blocks, "the fake answer contains a code block"
     controller._notify_finding("Build failed", ClientResult(response=response, metrics=LatencyMetrics(tier="local")))
     assert shown and shown[0].response.code_blocks == [] and shown[0].response.markdown == response.markdown
+    assert origins == ["watch"]
     assert tray.messages == [("OmniSight noticed something", "Build failed")]
 
 
@@ -1632,3 +1636,203 @@ def test_the_real_switch_flow_turns_on_only_after_yes(qapp: Any, acting: Any) ->
     controller.window.actions_check.setChecked(True)  # already checked: nothing more to ask
     controller._allow_box.button(QMessageBox.StandardButton.Yes).click()
     assert controller._actions_enabled and controller.window.actions_check.isChecked() and MemorySettings.store["actions_enabled"] is True
+
+
+def test_a_status_pill_animation_that_ticks_after_its_widget_is_gone_does_not_raise(qapp: Any) -> None:
+    from PyQt6 import sip
+    from PyQt6.QtGui import QColor
+
+    from ui.components import StatusPill
+
+    pill = StatusPill()
+    pill.set_state("Working", "#89B4FA", pulsing=True)
+    sip.delete(pill)
+    pill._on_color(QColor("#FF0000"))  # what a late animation tick calls; PyQt would abort the process on an exception here
+    pill._on_pulse(0.5)
+
+
+def test_two_asks_sent_back_to_back_through_the_bridge_start_only_one_request(qapp: Any, make_controller: Any) -> None:
+    from ui.bridge import BridgeWindow
+
+    bridge = BridgeWindow("token")
+    controller, _ = make_controller(window=bridge)
+    FakeWorker.hold = True
+    bridge._command({"cmd": "ask", "text": "first"})
+    bridge._command({"cmd": "ask", "text": "second"})
+    bridge._command({"cmd": "capture"})
+    assert wait_until(lambda: len(FakeWorker.instances) == 1, TIMEOUT_S, pump(qapp))
+    wait_until(lambda: False, 0.3, pump(qapp))  # time for a second request to start, if one were going to
+    assert len(FakeWorker.instances) == 1
+    assert FakeWorker.instances[0].request.prompt == "first"
+    bridge._command({"cmd": "engine", "key": "local_gpu"})  # refused while the request runs: the engine did not change
+    assert controller.settings.engine_choice != "local_gpu"
+    FakeWorker.instances[0].release()
+    assert wait_until(lambda: not controller.state.is_busy, TIMEOUT_S, pump(qapp))
+    assert bridge.exchange_count == 1
+
+
+def _bridge_controller(make_controller: Any) -> tuple[Any, Any, list[Any]]:
+    from ui.bridge import BridgeWindow
+
+    bridge = BridgeWindow("token")
+    asked: list[Any] = []
+    bridge.ask_allow_actions = lambda title, text, on_answer: asked.append((title, text, on_answer))  # type: ignore[method-assign]
+    controller, _ = make_controller(window=bridge)
+    return controller, bridge, asked
+
+
+def test_turning_on_commands_through_the_bridge_asks_the_app_and_waits_for_its_answer(qapp: Any, make_controller: Any) -> None:
+    controller, bridge, asked = _bridge_controller(make_controller)
+    bridge._command({"cmd": "set", "name": "actions", "on": True})
+    assert len(asked) == 1 and not controller._actions_enabled
+    title, text, answer = asked[0]
+    assert "Allow running commands" in title and "nothing runs until you type RUN" in text
+    bridge._command({"cmd": "set", "name": "actions", "on": True})  # a second click while the question is open asks nothing more
+    assert len(asked) == 1
+    answer(True)
+    assert controller._actions_enabled and MemorySettings.store["actions_enabled"] is True
+    assert controller._allow_box is None
+
+
+def test_a_no_leaves_commands_off_and_the_switch_is_pushed_back_off(qapp: Any, make_controller: Any) -> None:
+    controller, bridge, asked = _bridge_controller(make_controller)
+    bridge._command({"cmd": "set", "name": "actions", "on": True})
+    asked[0][2](False)
+    assert not controller._actions_enabled
+    assert bridge._sticky["switch:actions"]["on"] is False
+    bridge._command({"cmd": "set", "name": "actions", "on": True})  # and it can be asked again later
+    assert len(asked) == 2
+
+
+def test_with_no_app_connected_the_real_bridge_answers_no(qapp: Any, make_controller: Any) -> None:
+    from ui.bridge import BridgeWindow
+
+    bridge = BridgeWindow("token")
+    controller, _ = make_controller(window=bridge)
+    bridge._command({"cmd": "set", "name": "actions", "on": True})
+    assert not controller._actions_enabled and controller._allow_box is None
+
+
+def test_the_settings_page_data_comes_from_the_controller(qapp: Any, make_controller: Any) -> None:
+    from ui.bridge import BridgeWindow
+
+    bridge = BridgeWindow("token")
+    controller, _ = make_controller(window=bridge)
+    controller.capability_line = "test pc"
+    bridge._command({"cmd": "settings.apply", "override": "https://abc.trycloudflare.com", "local_url": "http://127.0.0.1:9000"})
+    assert controller.settings.manual_override_url == "https://abc.trycloudflare.com"
+    assert controller.settings.local_dev_url == "http://127.0.0.1:9000"
+    info = bridge._sticky["settings_info"]
+    assert info["override_url"] == "https://abc.trycloudflare.com" and info["local_url"] == "http://127.0.0.1:9000"
+    assert info["capability"] == "test pc" and info["log_dir"].endswith("logs") and "Alt+C" in info["hotkeys"]
+
+
+def test_a_bad_address_is_reported_not_applied(qapp: Any, make_controller: Any) -> None:
+    from ui.bridge import BridgeWindow
+
+    bridge = BridgeWindow("token")
+    results: list[str] = []
+    bridge.set_settings_result = results.append  # type: ignore[method-assign]
+    controller, _ = make_controller(window=bridge)
+    before = controller.settings.local_dev_url
+    bridge._command({"cmd": "settings.apply", "override": "", "local_url": "ftp://not-allowed"})
+    assert results and results[-1] != "Saved for this session."
+    assert controller.settings.local_dev_url == before
+
+
+class _FakeSession(QObject):
+    """Stands in for a BridgeRunSession: closes when told to."""
+
+    finished = pyqtSignal(int)
+
+    def __init__(self, cwd: Path) -> None:
+        super().__init__()
+        self.cwd = cwd
+
+
+def test_a_run_request_opens_the_approval_in_the_app_and_keeps_watch_off_the_screen_while_it_is_open(
+    qapp: Any, make_controller: Any, tmp_path: Path
+) -> None:
+    from ui.bridge import BridgeWindow
+
+    bridge = BridgeWindow("token")
+    opened: list[tuple[str, str]] = []
+    session = _FakeSession(tmp_path)
+
+    def opener(command: str, language: str, runner: Any, cwd: Path) -> Any:
+        opened.append((language, command))
+        return session
+
+    bridge.open_run_session = opener  # type: ignore[method-assign]
+    controller, _ = make_controller(window=bridge)
+    controller._actions_enabled = True
+    controller.on_run_requested("powershell", "Get-Date")
+    assert opened == [("powershell", "Get-Date")] and controller._action_dialog_open and controller._run_dialog is session
+    controller.on_run_requested("powershell", "Get-Date")  # one approval at a time
+    assert len(opened) == 1
+    session.finished.emit(0)
+    assert not controller._action_dialog_open and controller._run_dialog is None
+    assert MemorySettings.store["actions_cwd"] == str(tmp_path)
+
+
+def test_no_approval_opens_when_the_app_cannot_show_one(qapp: Any, make_controller: Any) -> None:
+    from ui.bridge import BridgeWindow
+
+    bridge = BridgeWindow("token")  # nobody connected: open_run_session returns None
+    controller, _ = make_controller(window=bridge)
+    controller._actions_enabled = True
+    controller.on_run_requested("powershell", "Get-Date")
+    assert controller._run_dialog is None and not controller._action_dialog_open
+
+
+def test_the_switch_must_be_on_and_the_text_a_terminal_command_for_the_bridge_too(qapp: Any, make_controller: Any) -> None:
+    from ui.bridge import BridgeWindow
+
+    bridge = BridgeWindow("token")
+    opened: list[Any] = []
+    bridge.open_run_session = lambda *a: opened.append(a)  # type: ignore[method-assign]
+    controller, _ = make_controller(window=bridge)
+    controller.on_run_requested("powershell", "Get-Date")  # the switch is off
+    controller._actions_enabled = True
+    controller.on_run_requested("python", "print(1)")  # not a terminal command
+    controller.on_run_requested("powershell", "   ")  # nothing to run
+    assert opened == []
+
+
+def test_quitting_tells_the_app_so_its_window_can_close(qapp: Any, make_controller: Any) -> None:
+    from ui.bridge import BridgeWindow
+
+    bridge = BridgeWindow("token")
+    said: list[int] = []
+    bridge.say_goodbye = lambda: said.append(1)  # type: ignore[method-assign]
+    controller, _ = make_controller(window=bridge)
+    controller.shutdown()
+    assert said and said[0] == 1
+
+
+def test_the_qt_window_has_nobody_to_say_goodbye_to(qapp: Any, make_controller: Any) -> None:
+    controller, _ = make_controller()
+    controller._say_goodbye()  # no say_goodbye on the Qt window: nothing happens, nothing breaks
+
+
+def test_the_trays_settings_goes_to_the_app_and_never_opens_the_qt_dialog(qapp: Any, make_controller: Any) -> None:
+    from ui.bridge import BridgeWindow
+
+    bridge = BridgeWindow("token")
+    shown: list[int] = []
+    bridge.show_settings = lambda: shown.append(1)  # type: ignore[method-assign]
+    controller, _ = make_controller(window=bridge)
+    controller.open_settings()
+    assert shown == [1] and getattr(controller, "_settings_dialog", None) is None
+
+
+def test_a_second_instance_in_bridge_mode_exits_with_zero_and_shows_no_message_box(monkeypatch: pytest.MonkeyPatch) -> None:
+    import types
+
+    calls: list[Any] = []
+    monkeypatch.setattr(main.ctypes, "windll", types.SimpleNamespace(user32=types.SimpleNamespace(MessageBoxW=lambda *a: calls.append(a))), raising=False)
+    monkeypatch.setattr(main.SingleInstanceLock, "acquire", lambda self: False)
+    assert main.main(["--bridge", "--no-hotkeys"]) == 0
+    assert calls == [], "a program that started this one cannot click a message box"
+    assert main.main(["--no-hotkeys"]) == 0
+    assert len(calls) == 1, "the normal program still shows its message box"

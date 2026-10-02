@@ -196,3 +196,10 @@ recordings/
 *.suo
 *.user
 *.sln.docstates
+
+# .NET build output
+desktop-app/**/bin/
+desktop-app/**/obj/
+desktop-app/**/publish/
+*.user
+.vs/

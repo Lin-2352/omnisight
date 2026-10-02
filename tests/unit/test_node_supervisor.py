@@ -126,6 +126,28 @@ def test_a_crash_during_startup_is_reported_with_the_last_output(rig: Rig) -> No
     assert rig.job.closed
 
 
+def test_a_powershell_error_record_is_not_shown_to_the_person(rig: Rig) -> None:
+    rig.supervisor.start("cuda")
+    assert wait_until(lambda: len(rig.supervisor.log_tail) == 3, 5)
+    noise = [
+        "13th Gen Intel(R) Core(TM) i9 - 32 GB RAM - NVIDIA GeForce RTX 4060 Laptop GPU 8 GB (1.2 GB free).",
+        "Client backend: kaggle",
+        "Not enough free GPU memory or RAM for a local model. Close other programs or use the Kaggle backend.",
+        "At D:\\repo\\scripts\\run-local-gpu.ps1:73 char:9",
+        '+         throw "Not enough free GPU memory ..."',
+        "+         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~",
+        "    + CategoryInfo          : OperationStopped: (Not enough...:String) [], RuntimeException",
+        "    + FullyQualifiedErrorId : Not enough free GPU memory or RAM for a local model. Close other programs or use the Kaggle",
+        "    backend.",
+    ]
+    rig.supervisor._log.extend(noise)
+    rig.process.code = 1
+    message = rig.supervisor.refresh().message
+    assert "Not enough free GPU memory or RAM" in message and "Kaggle backend" in message
+    assert "CategoryInfo" not in message and "FullyQualifiedErrorId" not in message and "At D:" not in message and "~~~" not in message
+    assert message == "The local node exited (code 1): Not enough free GPU memory or RAM for a local model. Close other programs or use the Kaggle backend."
+
+
 def test_startup_that_never_finishes_times_out_and_kills_the_node(rig: Rig, clock: ManualClock) -> None:
     rig.supervisor.start("cpu")
     clock.advance(601)

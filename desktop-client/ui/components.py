@@ -59,7 +59,6 @@ MAUVE: Final[str] = "#CBA6F7"
 TEAL: Final[str] = "#94E2D5"
 
 MONO_CANDIDATES: Final[tuple[str, ...]] = ("JetBrains Mono", "Cascadia Code", "Consolas", "Courier New")
-SHELL_LANGUAGES: Final[frozenset[str]] = frozenset({"bash", "sh", "powershell", "cmd", "bat", "batch", "console", "shell", "zsh"})
 
 
 def monospace_font(point_size: float = 10.0) -> QFont:
@@ -108,11 +107,18 @@ class StatusPill(QWidget):
 
     def _on_color(self, value: QColor) -> None:
         self._color = value
-        self.update()
+        self._repaint()
 
     def _on_pulse(self, value: float) -> None:
         self._pulse = float(value)
-        self.update()
+        self._repaint()
+
+    def _repaint(self) -> None:
+        # An animation can tick while its widget is being destroyed; PyQt turns any exception in a slot into a process abort.
+        try:
+            self.update()
+        except RuntimeError:
+            pass
 
     @property
     def text(self) -> str:
