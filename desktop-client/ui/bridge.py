@@ -33,6 +33,8 @@ from network.schemas import ClientResult
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 from PyQt6.QtNetwork import QHostAddress, QTcpServer, QTcpSocket
 
+from ui.bridge_run import MAX_FOLDER_CHARS, BridgeRunSession
+
 logger = get_logger("bridge")
 
 PROTOCOL_VERSION: Final[int] = 1
@@ -104,6 +106,7 @@ class BridgeWindow(QObject):
         self._auth_timer.timeout.connect(lambda: self._drop("no auth message in time"))
         self._sticky: dict[str, dict[str, Any]] = {}
         self._pending: dict[str, Callable[[bool], None]] = {}
+        self._run: BridgeRunSession | None = None
         self._exchanges: list[dict[str, Any]] = []
         self._state = AppState.IDLE
         self.ask_box = _TypedText()
@@ -148,6 +151,8 @@ class BridgeWindow(QObject):
         self._buffer = b""
         self._auth_timer.stop()
         self._cancel_pending()
+        if self._run is not None:
+            self._run.abandon()
         if client is not None:
             client.blockSignals(True)
             client.abort()
@@ -231,6 +236,10 @@ class BridgeWindow(QObject):
             "set": self._cmd_set,
             "run": self._cmd_run,
             "answer": self._cmd_answer,
+            "run.check": self._cmd_run_check,
+            "run.execute": self._cmd_run_execute,
+            "run.cancel": lambda m: self._with_session(m, lambda s: s.cancel_or_close()),
+            "run.close": lambda m: self._with_session(m, lambda s: s.close()),
             "settings.get": lambda _m: self.settings_info_requested.emit() or None,
             "settings.apply": self._cmd_settings_apply,
             "test_connection": lambda _m: self.connection_test_requested.emit() or None,
@@ -291,8 +300,43 @@ class BridgeWindow(QObject):
         language, command = message.get("language"), message.get("command")
         if not isinstance(language, str) or not isinstance(command, str) or not command.strip():
             return "run needs a language and a command"
+        if not self._was_offered(language, command):
+            return "that command was not offered by an answer"
         self.run_requested.emit(language, command)
         return None
+
+    def _was_offered(self, language: str, command: str) -> bool:
+        """Only a command that an answer's Run... button offered can open an approval (never a watch alert's, which has none)."""
+        return any(
+            run["language"] == language and run["command"] == command
+            for exchange in self._exchanges
+            if exchange["origin"] != "watch"
+            for run in exchange["actions"]["run"]
+        )
+
+    def _with_session(self, message: dict[str, Any], action: Callable[[BridgeRunSession], None]) -> str | None:
+        session = self._run
+        if session is None or message.get("id") != session.key:
+            return "there is no such approval open"
+        action(session)
+        return None
+
+    def _cmd_run_check(self, message: dict[str, Any]) -> str | None:
+        cwd = message.get("cwd", "")
+        if not isinstance(cwd, str) or len(cwd) > MAX_FOLDER_CHARS:
+            return "run.check needs a folder as text"
+        return self._with_session(message, lambda s: s.check(cwd))
+
+    def _cmd_run_execute(self, message: dict[str, Any]) -> str | None:
+        typed, cwd, timeout = message.get("typed", ""), message.get("cwd", ""), message.get("timeout_s")
+        if not isinstance(typed, str) or len(typed) > 16 or not isinstance(cwd, str) or len(cwd) > MAX_FOLDER_CHARS:
+            return "run.execute needs the typed word and a folder as text"
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+            return "run.execute needs a timeout in seconds"
+        problems: list[str] = []
+        # The command is never read from this message: the session runs the text it was opened with.
+        found = self._with_session(message, lambda s: problems.append(s.execute(typed, cwd, float(timeout)) or ""))
+        return found or (problems[0] if problems and problems[0] else None)
 
     def _cmd_answer(self, message: dict[str, Any]) -> str | None:
         """The app's reply to a question Python asked (``confirm``). Only a pending question, answered once, with a real boolean."""
@@ -436,6 +480,21 @@ class BridgeWindow(QObject):
         key = secrets.token_hex(8)
         self._pending[key] = on_answer
         self._send({"event": "confirm", "id": key, "kind": "allow_actions", "title": title, "text": text})
+
+    def open_run_session(self, command: str, language: str, runner: Any, cwd: Any) -> BridgeRunSession | None:
+        """Open an approval in the app. Nothing opens with nobody connected or while another approval is open."""
+        if not self.connected or (self._run is not None and not self._run.closed):
+            return None
+        key = secrets.token_hex(8)
+        session = BridgeRunSession(key, command, language, runner, cwd, self._send, parent=self)
+        self._run = session
+        session.finished.connect(lambda _code, s=session: self._run_over(s))
+        return session
+
+    def _run_over(self, session: BridgeRunSession) -> None:
+        if self._run is session:
+            self._run = None
+        session.deleteLater()
 
     def set_settings_info(self, info: dict[str, Any]) -> None:
         self._emit({"event": "settings_info", **info}, sticky="settings_info")

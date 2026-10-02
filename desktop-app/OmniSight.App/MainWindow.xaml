@@ -184,7 +184,7 @@
 
         <ui:TitleBar Grid.Row="0" Title="OmniSight" ShowMaximize="True" />
 
-        <Grid Grid.Row="1">
+        <Grid Grid.Row="1" IsEnabled="{Binding NoRunApproval}">
         <Grid.ColumnDefinitions>
             <ColumnDefinition Width="*" />
             <ColumnDefinition Width="Auto" />
@@ -386,6 +386,90 @@
                 </StackPanel>
             </ScrollViewer>
         </Border>
+        </Grid>
+
+        <!-- the "Run command" approval: a card inside this window (which is hidden from screen capture), no default button -->
+        <Grid x:Name="RunOverlay" Grid.RowSpan="2" Background="#B0000000"
+              Visibility="{Binding HasRunApproval, Converter={StaticResource BoolToVisibility}}" AutomationProperties.Name="Run command dialog">
+            <Border MaxWidth="760" Margin="28" VerticalAlignment="Center" Padding="24,20" CornerRadius="12" BorderThickness="1"
+                    DataContext="{Binding RunApproval}"
+                    Background="{DynamicResource ApplicationBackgroundBrush}" BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" MaxHeight="760" Focusable="False">
+                    <StackPanel>
+                        <ui:TextBlock Text="Run this command?" FontTypography="Subtitle" Margin="0,0,0,10" />
+                        <Border CornerRadius="8" Padding="12,8" Margin="0,0,0,10" BorderThickness="1"
+                                Background="{DynamicResource ControlFillColorSecondaryBrush}" BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}">
+                            <TextBlock Text="{Binding Banner}" TextWrapping="Wrap" Foreground="{DynamicResource SystemFillColorCautionBrush}" />
+                        </Border>
+                        <TextBlock Text="{Binding ShellName, StringFormat='Shell: {0}'}" Margin="0,0,0,6" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                        <TextBox Style="{StaticResource SelectableText}" Text="{Binding Command, Mode=OneWay}" FontFamily="{StaticResource CodeFont}" FontSize="13"
+                                 MinHeight="80" MaxHeight="200" Padding="10" TextWrapping="Wrap" AutomationProperties.Name="Command"
+                                 Background="{DynamicResource ControlFillColorSecondaryBrush}" VerticalScrollBarVisibility="Auto" />
+                        <TextBlock Text="{Binding VerdictText}" TextWrapping="Wrap" Margin="0,10,0,0" FontWeight="SemiBold"
+                                   Visibility="{Binding HasVerdict, Converter={StaticResource BoolToVisibility}}" AutomationProperties.LiveSetting="Assertive">
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock">
+                                    <Setter Property="Foreground" Value="{DynamicResource SystemFillColorCautionBrush}" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding VerdictIsRefusal}" Value="True">
+                                            <Setter Property="Foreground" Value="{DynamicResource SystemFillColorCriticalBrush}" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
+
+                        <Grid Margin="0,14,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0">
+                                <TextBlock Text="Working folder" FontSize="12" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                                <ui:TextBox Text="{Binding Cwd, UpdateSourceTrigger=PropertyChanged}" IsEnabled="{Binding CanEdit}" Margin="0,2,8,0"
+                                            AutomationProperties.Name="Working folder" />
+                            </StackPanel>
+                            <ui:Button Grid.Column="1" Content="Browse..." Click="OnRunBrowse" IsEnabled="{Binding CanEdit}" VerticalAlignment="Bottom" Margin="0,0,8,0"
+                                       AutomationProperties.Name="Browse folder" />
+                            <StackPanel Grid.Column="2">
+                                <TextBlock Text="Stop after (s)" FontSize="12" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                                <ui:NumberBox Value="{Binding TimeoutSeconds, Mode=TwoWay}" Minimum="{Binding MinTimeout}" Maximum="{Binding MaxTimeout}"
+                                              SmallChange="5" LargeChange="30" MaxDecimalPlaces="0" Width="120" Margin="0,2,0,0" IsEnabled="{Binding CanEdit}"
+                                              AutomationProperties.Name="Timeout seconds" />
+                            </StackPanel>
+                        </Grid>
+
+                        <TextBlock Text="{Binding ConfirmWord, StringFormat='To allow this, type {0}:'}" Margin="0,14,0,2" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                        <ui:TextBox x:Name="ConfirmBox" Text="{Binding Typed, UpdateSourceTrigger=PropertyChanged}" MaxLength="16" IsEnabled="{Binding CanEdit}"
+                                    PlaceholderText="type RUN" KeyDown="OnConfirmKeyDown" AutomationProperties.Name="Confirm text" />
+
+                        <StackPanel Orientation="Horizontal" Margin="0,16,0,0">
+                            <ui:Button Content="Run command" Appearance="Primary" Click="OnRunExecute" IsEnabled="{Binding CanRun}" Margin="0,0,8,0"
+                                       AutomationProperties.Name="Run command" ToolTip="Runs exactly the command shown above, once" />
+                            <ui:Button Content="{Binding CloseText}" Click="OnRunCancel" AutomationProperties.Name="Cancel"
+                                       ToolTip="Close without running (Esc does the same)" />
+                        </StackPanel>
+                        <TextBlock Text="{Binding Status}" TextWrapping="Wrap" Margin="0,12,0,0" AutomationProperties.LiveSetting="Polite"
+                                   Visibility="{Binding Status, Converter={StaticResource NonEmptyToVisibility}}">
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock">
+                                    <Setter Property="Foreground" Value="{DynamicResource TextFillColorSecondaryBrush}" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding StatusIsError}" Value="True">
+                                            <Setter Property="Foreground" Value="{DynamicResource SystemFillColorCriticalBrush}" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
+                        <TextBox Style="{StaticResource SelectableText}" Text="{Binding Output, Mode=OneWay}" FontFamily="{StaticResource CodeFont}" FontSize="12"
+                                 MinHeight="100" MaxHeight="260" Padding="10" Margin="0,10,0,0" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
+                                 Background="{DynamicResource ControlFillColorSecondaryBrush}" AutomationProperties.Name="Output"
+                                 Visibility="{Binding HasOutput, Converter={StaticResource BoolToVisibility}}" />
+                    </StackPanel>
+                </ScrollViewer>
+            </Border>
         </Grid>
 
         <!-- in-window dialogs (the "allow running commands" question) -->

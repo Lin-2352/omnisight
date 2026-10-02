@@ -23,6 +23,14 @@ public static class BridgeCommands
     public static string SettingsGet() => Build(("cmd", "settings.get"));
     public static string SettingsApply(string overrideUrl, string localUrl) => Build(("cmd", "settings.apply"), ("override", overrideUrl), ("local_url", localUrl));
     public static string TestConnection() => Build(("cmd", "test_connection"));
+    public static string RunCheck(string id, string cwd) => Build(("cmd", "run.check"), ("id", id), ("cwd", cwd));
+
+    /// <summary>Asks Python to run the command the approval was opened with. The command text is deliberately not part of this message.</summary>
+    public static string RunExecute(string id, string typed, string cwd, double timeoutSeconds) =>
+        Build(("cmd", "run.execute"), ("id", id), ("typed", typed), ("cwd", cwd), ("timeout_s", timeoutSeconds));
+
+    public static string RunCancel(string id) => Build(("cmd", "run.cancel"), ("id", id));
+    public static string RunClose(string id) => Build(("cmd", "run.close"), ("id", id));
     public static string Run(string language, string command) => Build(("cmd", "run"), ("language", language), ("command", command));
 
     public static string Set(string name, bool on)

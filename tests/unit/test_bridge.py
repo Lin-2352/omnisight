@@ -169,6 +169,7 @@ def test_commands_emit_the_window_signals(qapp: Any, bridge: BridgeWindow) -> No
     bridge.ask_requested.connect(lambda t: seen.append(("ask", t)))
     bridge.engine_selected.connect(lambda k: seen.append(("engine", k)))
     bridge.run_requested.connect(lambda lang, cmd: seen.append(("run", (lang, cmd))))
+    bridge.add_exchange("q", answer("Try:\n\n```powershell\nGet-Date\n```\n"))  # an answer must offer a command before it can be run
     peer = connect(qapp, bridge)
     for message in (
         {"cmd": "ask", "text": "  why does this crash?  "},

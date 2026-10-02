@@ -1738,3 +1738,62 @@ def test_a_bad_address_is_reported_not_applied(qapp: Any, make_controller: Any) 
     bridge._command({"cmd": "settings.apply", "override": "", "local_url": "ftp://not-allowed"})
     assert results and results[-1] != "Saved for this session."
     assert controller.settings.local_dev_url == before
+
+
+class _FakeSession(QObject):
+    """Stands in for a BridgeRunSession: closes when told to."""
+
+    finished = pyqtSignal(int)
+
+    def __init__(self, cwd: Path) -> None:
+        super().__init__()
+        self.cwd = cwd
+
+
+def test_a_run_request_opens_the_approval_in_the_app_and_keeps_watch_off_the_screen_while_it_is_open(
+    qapp: Any, make_controller: Any, tmp_path: Path
+) -> None:
+    from ui.bridge import BridgeWindow
+
+    bridge = BridgeWindow("token")
+    opened: list[tuple[str, str]] = []
+    session = _FakeSession(tmp_path)
+
+    def opener(command: str, language: str, runner: Any, cwd: Path) -> Any:
+        opened.append((language, command))
+        return session
+
+    bridge.open_run_session = opener  # type: ignore[method-assign]
+    controller, _ = make_controller(window=bridge)
+    controller._actions_enabled = True
+    controller.on_run_requested("powershell", "Get-Date")
+    assert opened == [("powershell", "Get-Date")] and controller._action_dialog_open and controller._run_dialog is session
+    controller.on_run_requested("powershell", "Get-Date")  # one approval at a time
+    assert len(opened) == 1
+    session.finished.emit(0)
+    assert not controller._action_dialog_open and controller._run_dialog is None
+    assert MemorySettings.store["actions_cwd"] == str(tmp_path)
+
+
+def test_no_approval_opens_when_the_app_cannot_show_one(qapp: Any, make_controller: Any) -> None:
+    from ui.bridge import BridgeWindow
+
+    bridge = BridgeWindow("token")  # nobody connected: open_run_session returns None
+    controller, _ = make_controller(window=bridge)
+    controller._actions_enabled = True
+    controller.on_run_requested("powershell", "Get-Date")
+    assert controller._run_dialog is None and not controller._action_dialog_open
+
+
+def test_the_switch_must_be_on_and_the_text_a_terminal_command_for_the_bridge_too(qapp: Any, make_controller: Any) -> None:
+    from ui.bridge import BridgeWindow
+
+    bridge = BridgeWindow("token")
+    opened: list[Any] = []
+    bridge.open_run_session = lambda *a: opened.append(a)  # type: ignore[method-assign]
+    controller, _ = make_controller(window=bridge)
+    controller.on_run_requested("powershell", "Get-Date")  # the switch is off
+    controller._actions_enabled = True
+    controller.on_run_requested("python", "print(1)")  # not a terminal command
+    controller.on_run_requested("powershell", "   ")  # nothing to run
+    assert opened == []

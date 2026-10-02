@@ -40,6 +40,7 @@ public partial class MainWindow : FluentWindow
         _viewModel.OpenLinkRequested += OpenInBrowser;
         _viewModel.ConfirmRequested += confirm => _ = ConfirmAsync(confirm);
         _viewModel.OpenFolderRequested += OpenFolder;
+        _viewModel.RunApprovalOpened += _ => Dispatcher.BeginInvoke(() => ConfirmBox.Focus(), System.Windows.Threading.DispatcherPriority.Input);
         RichText.LinkClicked += OnRichTextLink;
         Closed += (_, _) => RichText.LinkClicked -= OnRichTextLink;
         SyncNotice();
@@ -180,6 +181,48 @@ public partial class MainWindow : FluentWindow
         }
 
         return null;
+    }
+
+    // -- the "Run command" approval ----------------------------------------------------------------
+
+    private void OnRunExecute(object sender, RoutedEventArgs e) => _viewModel.RunApproval?.Execute();
+
+    private void OnRunCancel(object sender, RoutedEventArgs e) => _viewModel.RunApproval?.CancelOrClose();
+
+    private void OnRunBrowse(object sender, RoutedEventArgs e)
+    {
+        if (_viewModel.RunApproval is not { } approval)
+        {
+            return;
+        }
+
+        var dialog = new Microsoft.Win32.OpenFolderDialog { Title = "Working folder", InitialDirectory = approval.Cwd };
+        if (dialog.ShowDialog(this) == true)
+        {
+            approval.Cwd = dialog.FolderName;
+        }
+    }
+
+    /// <summary>Enter in the confirmation box does nothing: it never runs a command and never closes the approval.</summary>
+    private void OnConfirmKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key is Key.Enter or Key.Return)
+        {
+            e.Handled = true;
+        }
+    }
+
+    /// <summary>Esc stops a running command, otherwise closes the approval without running anything.</summary>
+    protected override void OnPreviewKeyDown(KeyEventArgs e)
+    {
+        if (e.Key == Key.Escape && _viewModel.RunApproval is { } approval)
+        {
+            approval.Escape();
+            e.Handled = true;
+            return;
+        }
+
+        base.OnPreviewKeyDown(e);
     }
 
     // -- questions from Python -------------------------------------------------------------------

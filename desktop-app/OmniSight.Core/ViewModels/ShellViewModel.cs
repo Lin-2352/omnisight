@@ -109,6 +109,11 @@ public sealed partial class ShellViewModel : ObservableObject
     [ObservableProperty]
     private bool _isPaneOpen;
 
+    /// <summary>The open "Run command" approval, if any. Nothing else in the window can be used while it is open.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasRunApproval), nameof(NoRunApproval))]
+    private RunApprovalViewModel? _runApproval;
+
     // settings page
     [ObservableProperty]
     private string _overrideUrl = "";
@@ -168,6 +173,11 @@ public sealed partial class ShellViewModel : ObservableObject
     public string PauseText => WatchPaused ? "Resume watching" : "Pause watching";
     public string NodeButtonText => NodeRunning ? "Stop local node" : "Start local node";
     public bool CanStopVoice => Speaking;
+    public bool HasRunApproval => RunApproval is not null;
+    public bool NoRunApproval => RunApproval is null;
+
+    /// <summary>Raised when an approval opens, so the window can put the keyboard focus in it.</summary>
+    public event Action<RunApprovalViewModel>? RunApprovalOpened;
 
     public void SetStarting(string text)
     {
@@ -443,6 +453,19 @@ public sealed partial class ShellViewModel : ObservableObject
             case SettingsResultEvent r:
                 SettingsResult = r.Text;
                 break;
+            case RunOpenEvent o:
+                RunApproval = new RunApprovalViewModel(o, json => CommandRequested?.Invoke(json));
+                RunApprovalOpened?.Invoke(RunApproval);
+                break;
+            case RunVerdictEvent v when RunApproval?.Id == v.Id:
+                RunApproval.ApplyVerdict(v.Refused, v.Warnings);
+                break;
+            case RunStateEvent st when RunApproval?.Id == st.Id:
+                RunApproval.ApplyState(st);
+                break;
+            case RunClosedEvent c when RunApproval?.Id == c.Id:
+                RunApproval = null;
+                break;
             case NoticeEvent n:
                 NoticeText = n.Text;
                 NoticeIsError = n.Error;
@@ -555,6 +578,10 @@ public sealed partial class ShellViewModel : ObservableObject
         ConfirmEvent c => $"question: {c.Title}",
         SettingsInfoEvent => "settings loaded",
         SettingsResultEvent r => $"settings: {r.Text}",
+        RunOpenEvent o => o.Refused is null ? "run approval opened" : "run approval opened (refused command)",
+        RunVerdictEvent => "run verdict changed",
+        RunStateEvent st => $"run {st.State}",
+        RunClosedEvent => "run approval closed",
         ExchangeEvent x => $"answer to: {x.Question}",
         ErrorEvent e => $"error: {e.Message}",
         SpeakAvailableEvent s => $"speech {(s.Available ? "available" : "not available")}",

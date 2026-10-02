@@ -532,7 +532,7 @@ class OmniSightController(QObject):
         self._actions_enabled = bool(saved.value("actions_enabled", False, type=bool))
         self._actions_cwd = Path(str(saved.value("actions_cwd", str(Path.home()))))
         self._action_dialog_open = False  # while it is open (and its output on screen) watch must not look at the screen
-        self._run_dialog: RunDialog | None = None
+        self._run_dialog: Any = None  # a RunDialog, or a BridgeRunSession when the C# app is the UI
         self._allow_box: QMessageBox | _Pending | None = None
         self._info_workers: list[QThread] = []
         self._search_enabled = bool(saved.value("web_search", False, type=bool))
@@ -988,11 +988,18 @@ class OmniSightController(QObject):
         """
         if not self._actions_enabled or not is_shell_language(language) or not command.strip() or self._run_dialog is not None:
             return
-        dialog = RunDialog(command, language, self.actions, self._actions_cwd, parent=self._window_widget())
+        opener = getattr(self.window, "open_run_session", None)
+        if opener is not None:  # the C# app shows the approval; it can only open it when it is connected
+            dialog: Any = opener(command, language, self.actions, self._actions_cwd)
+            if dialog is None:
+                return
+        else:
+            dialog = RunDialog(command, language, self.actions, self._actions_cwd, parent=self._window_widget())
         self._run_dialog = dialog
         self._action_dialog_open = True
         dialog.finished.connect(self._on_run_dialog_closed)
-        dialog.open()
+        if opener is None:
+            dialog.open()
 
     def _on_run_dialog_closed(self, _result: int) -> None:
         dialog, self._run_dialog = self._run_dialog, None

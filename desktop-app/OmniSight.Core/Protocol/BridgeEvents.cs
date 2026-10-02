@@ -32,6 +32,38 @@ public sealed record SettingsInfoEvent(
 
 public sealed record SettingsResultEvent(string Text) : BridgeEvent;
 
+/// <summary>An approval to run a command was opened. The command is fixed: the app never sends command text back.</summary>
+public sealed record RunOpenEvent(
+    string Id,
+    string Command,
+    string Shell,
+    string ShellName,
+    string Banner,
+    string Cwd,
+    string ConfirmWord,
+    double TimeoutS,
+    double MinTimeoutS,
+    double MaxTimeoutS,
+    string? Refused,
+    IReadOnlyList<string> Warnings) : BridgeEvent;
+
+/// <summary>The command's verdict changed (another working folder can change what the same text means).</summary>
+public sealed record RunVerdictEvent(string Id, string? Refused, IReadOnlyList<string> Warnings) : BridgeEvent;
+
+/// <summary>State of the run: running, stopping, finished (with output) or refused.</summary>
+public sealed record RunStateEvent(
+    string Id,
+    string State,
+    string Message,
+    string Output,
+    bool Truncated,
+    int? ExitCode,
+    bool TimedOut,
+    bool Cancelled,
+    double DurationS) : BridgeEvent;
+
+public sealed record RunClosedEvent(string Id) : BridgeEvent;
+
 public sealed record EngineChoice(string Key, string Label)
 {
     /// <summary>What a list or a screen reader shows for this choice.</summary>

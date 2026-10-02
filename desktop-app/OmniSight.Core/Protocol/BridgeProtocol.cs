@@ -59,6 +59,16 @@ public static class BridgeProtocol
                     Str(root, "endpoint"), Str(root, "override_url"), Str(root, "local_url"), Str(root, "capability"),
                     Str(root, "fallback_url"), Str(root, "hotkeys"), Str(root, "log_dir")),
                 "settings_result" => new SettingsResultEvent(Str(root, "text")),
+                "run_open" => new RunOpenEvent(
+                    Str(root, "id"), Str(root, "command"), Str(root, "shell"), Str(root, "shell_name"), Str(root, "banner"), Str(root, "cwd"),
+                    Str(root, "confirm_word") is { Length: > 0 } word ? word : "RUN",
+                    Double(root, "timeout_s", 60), Double(root, "min_timeout_s", 5), Double(root, "max_timeout_s", 300),
+                    NullableStr(root, "refused"), Strings(root, "warnings")),
+                "run_verdict" => new RunVerdictEvent(Str(root, "id"), NullableStr(root, "refused"), Strings(root, "warnings")),
+                "run_state" => new RunStateEvent(
+                    Str(root, "id"), Str(root, "state"), Str(root, "message"), Str(root, "output"), Bool(root, "truncated"),
+                    NullableInt(root, "exit_code"), Bool(root, "timed_out"), Bool(root, "cancelled"), Double(root, "duration_s", 0)),
+                "run_closed" => new RunClosedEvent(Str(root, "id")),
                 _ => new UnknownEvent(kind),
             };
         }
@@ -68,6 +78,7 @@ public static class BridgeProtocol
     private const int MaxSources = 16;
     private const int MaxRuns = 32;
     private const int MaxEngines = 32;
+    private const int MaxWarnings = 16;
 
     private static IReadOnlyList<EngineChoice> Engines(JsonElement root)
     {
@@ -127,6 +138,21 @@ public static class BridgeProtocol
         e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetDouble() : null;
 
     private static double Double(JsonElement e, string name) => NullableDouble(e, name) ?? 0;
+
+    private static double Double(JsonElement e, string name, double fallback) => NullableDouble(e, name) ?? fallback;
+
+    private static int? NullableInt(JsonElement e, string name) =>
+        e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var i) ? i : null;
+
+    private static IReadOnlyList<string> Strings(JsonElement e, string name)
+    {
+        if (e.ValueKind != JsonValueKind.Object || !e.TryGetProperty(name, out var array) || array.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        return array.EnumerateArray().Where(x => x.ValueKind == JsonValueKind.String).Select(x => x.GetString() ?? "").Take(MaxWarnings).ToList();
+    }
 
     private static string Str(JsonElement e, string name) =>
         e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
