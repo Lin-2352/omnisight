@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import secrets
 from collections.abc import Callable
 from typing import Any, Final
 
@@ -47,6 +48,7 @@ SWITCHES: Final[tuple[str, ...]] = ("memory", "speak", "search", "smart", "watch
 NEEDS_IDLE: Final[frozenset[str]] = frozenset({"ask", "capture", "engine", "clear"})
 NEEDS_IDLE_SWITCHES: Final[frozenset[str]] = frozenset({"search", "include_screen"})
 BUSY_STATES: Final[frozenset[AppState]] = frozenset({AppState.CAPTURING, AppState.ANALYZING})
+MAX_URL_CHARS: Final[int] = 500
 BUSY_MESSAGE: Final[str] = "OmniSight is busy: wait for the current answer to finish."
 
 
@@ -83,6 +85,9 @@ class BridgeWindow(QObject):
     #: The app told us its process id: the controller must never capture or watch that process's windows.
     peer_pid = pyqtSignal(int)
     connected_changed = pyqtSignal(bool)
+    settings_info_requested = pyqtSignal()
+    settings_apply_requested = pyqtSignal(str, str)  # (override URL, local node URL)
+    connection_test_requested = pyqtSignal()
 
     def __init__(self, token: str, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -98,6 +103,7 @@ class BridgeWindow(QObject):
         self._auth_timer.setSingleShot(True)
         self._auth_timer.timeout.connect(lambda: self._drop("no auth message in time"))
         self._sticky: dict[str, dict[str, Any]] = {}
+        self._pending: dict[str, Callable[[bool], None]] = {}
         self._exchanges: list[dict[str, Any]] = []
         self._state = AppState.IDLE
         self.ask_box = _TypedText()
@@ -141,6 +147,7 @@ class BridgeWindow(QObject):
         was_authed, self._authed = self._authed, False
         self._buffer = b""
         self._auth_timer.stop()
+        self._cancel_pending()
         if client is not None:
             client.blockSignals(True)
             client.abort()
@@ -223,6 +230,10 @@ class BridgeWindow(QObject):
             "watch_pause": lambda _m: self.watch_pause_clicked.emit() or None,
             "set": self._cmd_set,
             "run": self._cmd_run,
+            "answer": self._cmd_answer,
+            "settings.get": lambda _m: self.settings_info_requested.emit() or None,
+            "settings.apply": self._cmd_settings_apply,
+            "test_connection": lambda _m: self.connection_test_requested.emit() or None,
         }
         handler = handlers.get(name) if isinstance(name, str) else None
         if handler is None:
@@ -282,6 +293,30 @@ class BridgeWindow(QObject):
             return "run needs a language and a command"
         self.run_requested.emit(language, command)
         return None
+
+    def _cmd_answer(self, message: dict[str, Any]) -> str | None:
+        """The app's reply to a question Python asked (``confirm``). Only a pending question, answered once, with a real boolean."""
+        key, yes = message.get("id"), message.get("yes")
+        if not isinstance(yes, bool) or not isinstance(key, str):
+            return "answer needs an id and a true or false value"
+        callback = self._pending.pop(key, None)
+        if callback is None:
+            return "there is no such question to answer"
+        callback(yes)
+        return None
+
+    def _cmd_settings_apply(self, message: dict[str, Any]) -> str | None:
+        override, local_url = message.get("override", ""), message.get("local_url", "")
+        if not isinstance(override, str) or not isinstance(local_url, str) or len(override) > MAX_URL_CHARS or len(local_url) > MAX_URL_CHARS:
+            return "settings need two addresses as text"
+        self.settings_apply_requested.emit(override.strip(), local_url.strip())
+        return None
+
+    def _cancel_pending(self) -> None:
+        """Questions nobody can answer any more are answered No (the safe default)."""
+        pending, self._pending = self._pending, {}
+        for callback in pending.values():
+            callback(False)
 
     # -- events to the app (the MainWindow interface the controller calls) ------------------------------
 
@@ -392,6 +427,21 @@ class BridgeWindow(QObject):
 
     def set_speaking(self, speaking: bool) -> None:
         self._emit({"event": "speaking", "on": speaking}, sticky="speaking")
+
+    def ask_allow_actions(self, title: str, text: str, on_answer: Callable[[bool], None]) -> None:
+        """Ask the app the "Allow running commands?" question. With nobody to answer, the answer is No."""
+        if not self.connected:
+            on_answer(False)
+            return
+        key = secrets.token_hex(8)
+        self._pending[key] = on_answer
+        self._send({"event": "confirm", "id": key, "kind": "allow_actions", "title": title, "text": text})
+
+    def set_settings_info(self, info: dict[str, Any]) -> None:
+        self._emit({"event": "settings_info", **info}, sticky="settings_info")
+
+    def set_settings_result(self, text: str) -> None:
+        self._send({"event": "settings_result", "text": text})
 
     def set_watch_status(self, text: str, *, paused: bool = False) -> None:
         self._emit({"event": "watch", "text": text, "paused": paused}, sticky="watch")

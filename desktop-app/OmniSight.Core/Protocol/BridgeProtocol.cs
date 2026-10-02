@@ -54,6 +54,11 @@ public static class BridgeProtocol
                 "show" => new ShowEvent(),
                 "pong" => new PongEvent(),
                 "error" => new ErrorEvent(Str(root, "message")),
+                "confirm" => new ConfirmEvent(Str(root, "id"), Str(root, "kind"), Str(root, "title"), Str(root, "text")),
+                "settings_info" => new SettingsInfoEvent(
+                    Str(root, "endpoint"), Str(root, "override_url"), Str(root, "local_url"), Str(root, "capability"),
+                    Str(root, "fallback_url"), Str(root, "hotkeys"), Str(root, "log_dir")),
+                "settings_result" => new SettingsResultEvent(Str(root, "text")),
                 _ => new UnknownEvent(kind),
             };
         }

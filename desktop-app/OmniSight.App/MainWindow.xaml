@@ -102,9 +102,9 @@
                              Margin="0,8,0,10" AutomationProperties.Name="Summary" />
                     <ItemsControl ItemsSource="{Binding Blocks}" Focusable="False" />
                     <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
-                        <ui:Button Content="Copy Fix" Margin="0,0,8,0" Click="OnCopyFix" AutomationProperties.Name="Copy Fix"
+                        <ui:Button Content="Copy Fix" Margin="0,0,8,0" Padding="16,6" MinWidth="96" Click="OnCopyFix" AutomationProperties.Name="Copy Fix"
                                    Visibility="{Binding HasCopyFix, Converter={StaticResource BoolToVisibility}}" />
-                        <ui:Button Content="Copy Terminal Command" Click="OnCopyCommand" AutomationProperties.Name="Copy Terminal Command"
+                        <ui:Button Content="Copy Terminal Command" Padding="16,6" Click="OnCopyCommand" AutomationProperties.Name="Copy Terminal Command"
                                    Visibility="{Binding HasCopyCommand, Converter={StaticResource BoolToVisibility}}" />
                     </StackPanel>
                     <ItemsControl ItemsSource="{Binding RunButtons}" Margin="0,8,0,0" Focusable="False"
@@ -163,6 +163,13 @@
             <Setter Property="TextDecorations" Value="Underline" />
         </Style>
 
+        <Style x:Key="SectionCaption" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="11" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Margin" Value="0,14,0,6" />
+            <Setter Property="Foreground" Value="{DynamicResource TextFillColorTertiaryBrush}" />
+        </Style>
+
         <Style x:Key="TipTitle" TargetType="TextBlock">
             <Setter Property="FontWeight" Value="SemiBold" />
             <Setter Property="Margin" Value="0,0,0,4" />
@@ -177,7 +184,12 @@
 
         <ui:TitleBar Grid.Row="0" Title="OmniSight" ShowMaximize="True" />
 
-        <Grid Grid.Row="1" Margin="24,4,24,20">
+        <Grid Grid.Row="1">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*" />
+            <ColumnDefinition Width="Auto" />
+        </Grid.ColumnDefinitions>
+        <Grid Grid.Column="0" Margin="24,4,24,20">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
@@ -188,20 +200,30 @@
             </Grid.RowDefinitions>
 
             <!-- header -->
-            <DockPanel Grid.Row="0" Margin="0,0,0,12">
-                <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
+            <Grid Grid.Row="0" Margin="0,0,0,8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Top">
                     <ui:TextBlock Text="OmniSight" FontTypography="Title" VerticalAlignment="Center" />
                     <ui:TextBlock Text="ask your screen" Margin="10,10,0,0" VerticalAlignment="Center"
                                   Foreground="{DynamicResource TextFillColorTertiaryBrush}" />
                 </StackPanel>
-                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right">
-                    <ComboBox x:Name="EngineBox" MinWidth="230" Margin="0,0,8,0" ItemsSource="{Binding Engines}"
+                <!-- wraps onto a second line instead of being clipped when the window is narrow -->
+                <WrapPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right">
+                    <ui:Button x:Name="NodeButton" Content="{Binding NodeButtonText}" Margin="8,0,0,8" Click="OnNode"
+                               Visibility="{Binding NodeVisible, Converter={StaticResource BoolToVisibility}}"
+                               AutomationProperties.Name="Node" ToolTip="Start or stop the model running on this PC" />
+                    <ComboBox x:Name="EngineBox" MinWidth="210" Margin="8,0,0,8" ItemsSource="{Binding Engines}"
                               DisplayMemberPath="Label" SelectedValuePath="Key" SelectedValue="{Binding SelectedEngineKey, Mode=TwoWay}"
                               IsEnabled="{Binding CanInput}" AutomationProperties.Name="Engine" ToolTip="Where the answer is computed" />
-                    <ui:Button Content="Clear" Icon="{ui:SymbolIcon Delete24}" Click="OnClear" IsEnabled="{Binding CanInput}"
+                    <ui:Button Content="Clear" Icon="{ui:SymbolIcon Delete24}" Click="OnClear" IsEnabled="{Binding CanInput}" Margin="8,0,0,8"
                                AutomationProperties.Name="Clear" ToolTip="Clear the answers shown here" />
-                </StackPanel>
-            </DockPanel>
+                    <ToggleButton Content="Options" IsChecked="{Binding IsPaneOpen, Mode=TwoWay}" Padding="14,6" Margin="8,0,0,8"
+                                  AutomationProperties.Name="Options" ToolTip="Switches and settings" />
+                </WrapPanel>
+            </Grid>
 
             <!-- status pill -->
             <Border Grid.Row="1" CornerRadius="14" Padding="14,6" Margin="0,0,0,10" HorizontalAlignment="Left"
@@ -232,6 +254,9 @@
                                Visibility="{Binding StatusText, Converter={StaticResource NonEmptyToVisibility}}" />
                     <ui:ProgressRing Width="16" Height="16" Margin="12,0,0,0" IsIndeterminate="True"
                                      Visibility="{Binding IsBusy, Converter={StaticResource BoolToVisibility}}" />
+                    <ui:Button Content="Stop voice" Icon="{ui:SymbolIcon Speaker024}" Margin="14,-4,-6,-4" Padding="10,3" Click="OnStopVoice"
+                               AutomationProperties.Name="Stop voice" ToolTip="Stop reading the answer aloud (Esc does this too)"
+                               Visibility="{Binding Speaking, Converter={StaticResource BoolToVisibility}}" />
                     <ui:Button Content="Restart engine" Icon="{ui:SymbolIcon ArrowClockwise24}" Margin="14,-4,-6,-4" Padding="10,3"
                                Click="OnRestart" AutomationProperties.Name="Restart engine"
                                Visibility="{Binding CanRestart, Converter={StaticResource BoolToVisibility}}" />
@@ -297,5 +322,73 @@
                 </StackPanel>
             </DockPanel>
         </Grid>
+
+        <!-- options and settings -->
+        <Border Grid.Column="1" Width="360" Margin="0,4,24,20" Padding="0" CornerRadius="10" BorderThickness="1"
+                Background="{DynamicResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}"
+                Visibility="{Binding IsPaneOpen, Converter={StaticResource BoolToVisibility}}" AutomationProperties.Name="Options pane">
+            <ScrollViewer VerticalScrollBarVisibility="Auto" Focusable="False">
+                <StackPanel Margin="18,14">
+                    <TextBlock Text="ASK" Style="{StaticResource SectionCaption}" />
+                    <ui:ToggleSwitch Content="Remember the conversation" IsChecked="{Binding MemoryOn, Mode=TwoWay}" Margin="0,0,0,4"
+                                     AutomationProperties.Name="Remember"
+                                     ToolTip="Keeps the last few questions and answers (text only) so follow-ups make sense" />
+
+                    <TextBlock Text="EXTRAS" Style="{StaticResource SectionCaption}" />
+                    <ui:ToggleSwitch Content="Speak answers" IsChecked="{Binding SpeakOn, Mode=TwoWay}" IsEnabled="{Binding SpeakAvailable}" Margin="0,0,0,4"
+                                     AutomationProperties.Name="Speak" ToolTip="Read the summary of each answer aloud with the Windows voice" />
+                    <ui:ToggleSwitch Content="Search the web" IsChecked="{Binding SearchOn, Mode=TwoWay}" IsEnabled="{Binding CanInput}" Margin="0,0,0,4"
+                                     AutomationProperties.Name="Search web"
+                                     ToolTip="Off by default. On: your typed question is sent as a search to Stack Overflow and Wikipedia (free, no account) and the top results are quoted to the model." />
+                    <ui:ToggleSwitch Content="Smart query" IsChecked="{Binding SmartOn, Mode=TwoWay}" IsEnabled="{Binding SmartEnabled}" Margin="0,0,0,4"
+                                     AutomationProperties.Name="Smart query"
+                                     ToolTip="Let the model write the search: your question is first rewritten into keywords. If the cloud engine answers it may run its own Google searches from the whole question, including the screen and your voice." />
+
+                    <TextBlock Text="AUTOMATION" Style="{StaticResource SectionCaption}" />
+                    <ui:ToggleSwitch Content="Watch my screen" IsChecked="{Binding WatchOn, Mode=TwoWay}" Margin="0,0,0,2" AutomationProperties.Name="Watch screen"
+                                     ToolTip="Off whenever the app starts. On: every few seconds, if the screen changed, the model on THIS PC checks it for an error and tells you once. Needs a local engine. Nothing leaves this PC and nothing is saved." />
+                    <StackPanel Margin="0,0,0,6" Visibility="{Binding HasWatch, Converter={StaticResource BoolToVisibility}}">
+                        <TextBlock Text="{Binding WatchText}" TextWrapping="Wrap" FontSize="12" Margin="0,0,0,6" AutomationProperties.LiveSetting="Polite"
+                                   Foreground="{DynamicResource SystemFillColorCautionBrush}" />
+                        <ui:Button Content="{Binding PauseText}" Click="OnPauseWatch" AutomationProperties.Name="{Binding PauseText}"
+                                   ToolTip="Pause or resume watching (also in the tray menu)" />
+                    </StackPanel>
+                    <ui:ToggleSwitch Content="Allow running commands" IsChecked="{Binding ActionsOn, Mode=TwoWay}" Margin="0,0,0,4"
+                                     AutomationProperties.Name="Allow running commands"
+                                     ToolTip="Off by default. On: answers with a terminal command get a Run... button. It opens a dialog that shows the exact command and needs you to type RUN every time. Nothing ever runs by itself." />
+
+                    <TextBlock Text="SETTINGS" Style="{StaticResource SectionCaption}" />
+                    <TextBlock Text="Active endpoint" FontSize="12" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                    <TextBox Style="{StaticResource SelectableText}" Text="{Binding ActiveEndpoint, Mode=OneWay}" FontSize="12" Margin="0,0,0,8"
+                             AutomationProperties.Name="Active endpoint address" />
+                    <TextBlock Text="Override URL (empty = use the gist)" FontSize="12" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                    <ui:TextBox Text="{Binding OverrideUrl, UpdateSourceTrigger=PropertyChanged}" PlaceholderText="https://name.trycloudflare.com" Margin="0,2,0,8"
+                                AutomationProperties.Name="Override URL" />
+                    <TextBlock Text="Local node" FontSize="12" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                    <ui:TextBox Text="{Binding LocalUrl, UpdateSourceTrigger=PropertyChanged}" PlaceholderText="http://127.0.0.1:8000" Margin="0,2,0,8"
+                                AutomationProperties.Name="Local node URL" />
+                    <TextBlock Text="This PC" FontSize="12" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                    <TextBox Style="{StaticResource SelectableText}" Text="{Binding Capability, Mode=OneWay}" FontSize="12" Margin="0,0,0,8" AutomationProperties.Name="This PC details" />
+                    <TextBlock Text="Hotkeys" FontSize="12" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                    <TextBox Style="{StaticResource SelectableText}" Text="{Binding Hotkeys, Mode=OneWay}" FontSize="12" Margin="0,0,0,10" AutomationProperties.Name="Hotkeys list" />
+                    <WrapPanel Margin="0,0,0,6">
+                        <ui:Button Content="Apply" Click="OnApplySettings" Margin="0,0,8,6" AutomationProperties.Name="Apply settings" />
+                        <ui:Button Content="Test connection" Click="OnTestConnection" Margin="0,0,8,6" AutomationProperties.Name="Test connection" />
+                        <ui:Button Content="Open logs" Click="OnOpenLogs" Margin="0,0,8,6" AutomationProperties.Name="Open logs" />
+                    </WrapPanel>
+                    <TextBlock Text="{Binding SettingsResult}" TextWrapping="Wrap" FontSize="12" AutomationProperties.LiveSetting="Polite"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                               Visibility="{Binding SettingsResult, Converter={StaticResource NonEmptyToVisibility}}" />
+
+                    <TextBlock Text="EVENTS" Style="{StaticResource SectionCaption}" />
+                    <ListBox ItemsSource="{Binding Log}" MaxHeight="160" BorderThickness="0" Background="Transparent" FontSize="11"
+                             AutomationProperties.Name="Events" />
+                </StackPanel>
+            </ScrollViewer>
+        </Border>
+        </Grid>
+
+        <!-- in-window dialogs (the "allow running commands" question) -->
+        <ui:ContentDialogHost x:Name="DialogHost" Grid.RowSpan="2" />
     </Grid>
 </ui:FluentWindow>

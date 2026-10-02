@@ -27,7 +27,6 @@ public sealed partial class ShellViewModel : ObservableObject
     public const string ChatPlaceholder = "Message OmniSight (no screenshot is sent)…  (Enter to send)";
 
     private bool _applying;
-    private bool _actionsEnabled;
     private string _idleText = "Ready.";
 
     [ObservableProperty]
@@ -66,6 +65,75 @@ public sealed partial class ShellViewModel : ObservableObject
     [ObservableProperty]
     private string? _selectedEngineKey;
 
+    // the switches: they send a command when the person flips them, never when Python tells us their state
+    [ObservableProperty]
+    private bool _memoryOn;
+
+    [ObservableProperty]
+    private bool _speakOn;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(SmartEnabled))]
+    private bool _searchOn;
+
+    [ObservableProperty]
+    private bool _smartOn;
+
+    [ObservableProperty]
+    private bool _watchOn;
+
+    [ObservableProperty]
+    private bool _actionsOn;
+
+    [ObservableProperty]
+    private bool _speakAvailable = true;
+
+    [ObservableProperty]
+    private bool _speaking;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasWatch))]
+    private string _watchText = "";
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(PauseText))]
+    private bool _watchPaused;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(NodeButtonText))]
+    private bool _nodeRunning;
+
+    [ObservableProperty]
+    private bool _nodeVisible;
+
+    [ObservableProperty]
+    private bool _isPaneOpen;
+
+    // settings page
+    [ObservableProperty]
+    private string _overrideUrl = "";
+
+    [ObservableProperty]
+    private string _localUrl = "";
+
+    [ObservableProperty]
+    private string _activeEndpoint = "";
+
+    [ObservableProperty]
+    private string _capability = "";
+
+    [ObservableProperty]
+    private string _fallbackUrl = "";
+
+    [ObservableProperty]
+    private string _hotkeys = "";
+
+    [ObservableProperty]
+    private string _logDir = "";
+
+    [ObservableProperty]
+    private string _settingsResult = "";
+
     public ObservableCollection<string> Log { get; } = [];
     public ObservableCollection<ExchangeCard> Conversation { get; } = [];
     public ObservableCollection<EngineChoice> Engines { get; } = [];
@@ -79,6 +147,12 @@ public sealed partial class ShellViewModel : ObservableObject
     /// <summary>Raised with a safe (checked by <see cref="LinkPolicy"/>) address to open in the browser.</summary>
     public event Action<string>? OpenLinkRequested;
 
+    /// <summary>Raised when Python needs a yes or no. The window must show a dialog whose default answer is No.</summary>
+    public event Action<ConfirmEvent>? ConfirmRequested;
+
+    /// <summary>Raised with an existing folder to open in Explorer (the log folder).</summary>
+    public event Action<string>? OpenFolderRequested;
+
     /// <summary>The engine is not running: offer "Restart engine".</summary>
     public bool CanRestart => Connection is ConnectionState.Failed or ConnectionState.Disconnected;
 
@@ -89,6 +163,11 @@ public sealed partial class ShellViewModel : ObservableObject
     public string MicText => IsRecording ? "Stop and send" : "Speak";
     public string Placeholder => IncludeScreen ? AskPlaceholder : ChatPlaceholder;
     public bool HasConversation => Conversation.Count > 0;
+    public bool SmartEnabled => SearchOn;
+    public bool HasWatch => WatchText.Length > 0;
+    public string PauseText => WatchPaused ? "Resume watching" : "Pause watching";
+    public string NodeButtonText => NodeRunning ? "Stop local node" : "Start local node";
+    public bool CanStopVoice => Speaking;
 
     public void SetStarting(string text)
     {
@@ -196,6 +275,68 @@ public sealed partial class ShellViewModel : ObservableObject
         return true;
     }
 
+    partial void OnMemoryOnChanged(bool value) => SendSwitch("memory", value);
+
+    partial void OnSpeakOnChanged(bool value) => SendSwitch("speak", value);
+
+    partial void OnSearchOnChanged(bool value) => SendSwitch("search", value);
+
+    partial void OnSmartOnChanged(bool value) => SendSwitch("smart", value);
+
+    partial void OnWatchOnChanged(bool value) => SendSwitch("watch", value);
+
+    partial void OnActionsOnChanged(bool value) => SendSwitch("actions", value);
+
+    private void SendSwitch(string name, bool on)
+    {
+        if (!_applying)
+        {
+            CommandRequested?.Invoke(BridgeCommands.Set(name, on));
+        }
+    }
+
+    public void ToggleNode() => CommandRequested?.Invoke(BridgeCommands.NodeToggle());
+
+    public void StopVoice() => CommandRequested?.Invoke(BridgeCommands.StopSpeaking());
+
+    public void PauseWatch() => CommandRequested?.Invoke(BridgeCommands.WatchPause());
+
+    /// <summary>The person's answer to a <see cref="ConfirmEvent"/>.</summary>
+    public void AnswerConfirm(string id, bool yes) => CommandRequested?.Invoke(BridgeCommands.Answer(id, yes));
+
+    public void RefreshSettings() => CommandRequested?.Invoke(BridgeCommands.SettingsGet());
+
+    public void ApplySettings()
+    {
+        SettingsResult = "";
+        CommandRequested?.Invoke(BridgeCommands.SettingsApply(OverrideUrl.Trim(), LocalUrl.Trim()));
+    }
+
+    public void TestConnection()
+    {
+        SettingsResult = "Checking…";
+        CommandRequested?.Invoke(BridgeCommands.TestConnection());
+    }
+
+    public bool OpenLogs()
+    {
+        if (LogDir.Length == 0 || !Path.IsPathRooted(LogDir) || !Directory.Exists(LogDir))
+        {
+            return false;
+        }
+
+        OpenFolderRequested?.Invoke(LogDir);
+        return true;
+    }
+
+    partial void OnIsPaneOpenChanged(bool value)
+    {
+        if (value)
+        {
+            RefreshSettings();
+        }
+    }
+
     partial void OnIncludeScreenChanged(bool value)
     {
         if (!_applying)
@@ -264,7 +405,43 @@ public sealed partial class ShellViewModel : ObservableObject
                 break;
             case NodeEvent n:
                 NodeText = n.Device is { Length: > 0 } ? $"{n.State}: {n.Device}" : n.State;
+                NodeVisible = n.Engine.StartsWith("local", StringComparison.Ordinal) || n.Engine == "auto";
+                NodeRunning = n.State is "starting" or "ready" && n.Owned;
                 ApplyNode(n);
+                break;
+            case SpeakAvailableEvent a:
+                SpeakAvailable = a.Available;
+                break;
+            case SpeakingEvent sp:
+                Speaking = sp.On;
+                OnPropertyChanged(nameof(CanStopVoice));
+                break;
+            case WatchEvent w:
+                WatchText = w.Text;
+                WatchPaused = w.Paused;
+                break;
+            case ConfirmEvent c:
+                if (c.Kind == "allow_actions" && ConfirmRequested is not null)
+                {
+                    ConfirmRequested(c);
+                }
+                else
+                {
+                    CommandRequested?.Invoke(BridgeCommands.Answer(c.Id, false));  // a question nobody can show is answered No
+                }
+
+                break;
+            case SettingsInfoEvent i:
+                ActiveEndpoint = i.Endpoint;
+                OverrideUrl = i.OverrideUrl;
+                LocalUrl = i.LocalUrl;
+                Capability = i.Capability;
+                FallbackUrl = i.FallbackUrl;
+                Hotkeys = i.Hotkeys;
+                LogDir = i.LogDir;
+                break;
+            case SettingsResultEvent r:
+                SettingsResult = r.Text;
                 break;
             case NoticeEvent n:
                 NoticeText = n.Text;
@@ -280,7 +457,7 @@ public sealed partial class ShellViewModel : ObservableObject
                 break;
             case ExchangeEvent x:
                 NoticeText = "";
-                Conversation.Add(ExchangeCard.From(x, _actionsEnabled));
+                Conversation.Add(ExchangeCard.From(x, ActionsOn));
                 while (Conversation.Count > MaxCards)
                 {
                     Conversation.RemoveAt(0);
@@ -292,8 +469,33 @@ public sealed partial class ShellViewModel : ObservableObject
                 Conversation.Clear();
                 OnPropertyChanged(nameof(HasConversation));
                 break;
-            case SwitchEvent { Name: "actions" } s:
-                _actionsEnabled = s.On;
+            case SwitchEvent s:
+                ApplySwitch(s);
+                break;
+        }
+    }
+
+    private void ApplySwitch(SwitchEvent s)
+    {
+        switch (s.Name)
+        {
+            case "memory":
+                MemoryOn = s.On;
+                break;
+            case "speak":
+                SpeakOn = s.On;
+                break;
+            case "search":
+                SearchOn = s.On;
+                break;
+            case "smart":
+                SmartOn = s.On;
+                break;
+            case "watch":
+                WatchOn = s.On;
+                break;
+            case "actions":
+                ActionsOn = s.On;
                 foreach (var card in Conversation)
                 {
                     card.ShowRun = s.On && !card.IsWatch;
@@ -350,6 +552,9 @@ public sealed partial class ShellViewModel : ObservableObject
         ProgressEvent p => $"progress: {p.Text}",
         EngineEvent e => $"engine {e.Key}",
         SwitchEvent s => $"switch {s.Name} {(s.On ? "on" : "off")}",
+        ConfirmEvent c => $"question: {c.Title}",
+        SettingsInfoEvent => "settings loaded",
+        SettingsResultEvent r => $"settings: {r.Text}",
         ExchangeEvent x => $"answer to: {x.Question}",
         ErrorEvent e => $"error: {e.Message}",
         SpeakAvailableEvent s => $"speech {(s.Available ? "available" : "not available")}",

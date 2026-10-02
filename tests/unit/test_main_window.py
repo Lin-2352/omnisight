@@ -1669,3 +1669,72 @@ def test_two_asks_sent_back_to_back_through_the_bridge_start_only_one_request(qa
     FakeWorker.instances[0].release()
     assert wait_until(lambda: not controller.state.is_busy, TIMEOUT_S, pump(qapp))
     assert bridge.exchange_count == 1
+
+
+def _bridge_controller(make_controller: Any) -> tuple[Any, Any, list[Any]]:
+    from ui.bridge import BridgeWindow
+
+    bridge = BridgeWindow("token")
+    asked: list[Any] = []
+    bridge.ask_allow_actions = lambda title, text, on_answer: asked.append((title, text, on_answer))  # type: ignore[method-assign]
+    controller, _ = make_controller(window=bridge)
+    return controller, bridge, asked
+
+
+def test_turning_on_commands_through_the_bridge_asks_the_app_and_waits_for_its_answer(qapp: Any, make_controller: Any) -> None:
+    controller, bridge, asked = _bridge_controller(make_controller)
+    bridge._command({"cmd": "set", "name": "actions", "on": True})
+    assert len(asked) == 1 and not controller._actions_enabled
+    title, text, answer = asked[0]
+    assert "Allow running commands" in title and "nothing runs until you type RUN" in text
+    bridge._command({"cmd": "set", "name": "actions", "on": True})  # a second click while the question is open asks nothing more
+    assert len(asked) == 1
+    answer(True)
+    assert controller._actions_enabled and MemorySettings.store["actions_enabled"] is True
+    assert controller._allow_box is None
+
+
+def test_a_no_leaves_commands_off_and_the_switch_is_pushed_back_off(qapp: Any, make_controller: Any) -> None:
+    controller, bridge, asked = _bridge_controller(make_controller)
+    bridge._command({"cmd": "set", "name": "actions", "on": True})
+    asked[0][2](False)
+    assert not controller._actions_enabled
+    assert bridge._sticky["switch:actions"]["on"] is False
+    bridge._command({"cmd": "set", "name": "actions", "on": True})  # and it can be asked again later
+    assert len(asked) == 2
+
+
+def test_with_no_app_connected_the_real_bridge_answers_no(qapp: Any, make_controller: Any) -> None:
+    from ui.bridge import BridgeWindow
+
+    bridge = BridgeWindow("token")
+    controller, _ = make_controller(window=bridge)
+    bridge._command({"cmd": "set", "name": "actions", "on": True})
+    assert not controller._actions_enabled and controller._allow_box is None
+
+
+def test_the_settings_page_data_comes_from_the_controller(qapp: Any, make_controller: Any) -> None:
+    from ui.bridge import BridgeWindow
+
+    bridge = BridgeWindow("token")
+    controller, _ = make_controller(window=bridge)
+    controller.capability_line = "test pc"
+    bridge._command({"cmd": "settings.apply", "override": "https://abc.trycloudflare.com", "local_url": "http://127.0.0.1:9000"})
+    assert controller.settings.manual_override_url == "https://abc.trycloudflare.com"
+    assert controller.settings.local_dev_url == "http://127.0.0.1:9000"
+    info = bridge._sticky["settings_info"]
+    assert info["override_url"] == "https://abc.trycloudflare.com" and info["local_url"] == "http://127.0.0.1:9000"
+    assert info["capability"] == "test pc" and info["log_dir"].endswith("logs") and "Alt+C" in info["hotkeys"]
+
+
+def test_a_bad_address_is_reported_not_applied(qapp: Any, make_controller: Any) -> None:
+    from ui.bridge import BridgeWindow
+
+    bridge = BridgeWindow("token")
+    results: list[str] = []
+    bridge.set_settings_result = results.append  # type: ignore[method-assign]
+    controller, _ = make_controller(window=bridge)
+    before = controller.settings.local_dev_url
+    bridge._command({"cmd": "settings.apply", "override": "", "local_url": "ftp://not-allowed"})
+    assert results and results[-1] != "Saved for this session."
+    assert controller.settings.local_dev_url == before

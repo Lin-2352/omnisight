@@ -465,6 +465,27 @@ class SettingsDialog(QDialog):
 # ---------------------------------------------------------------------------
 
 
+class _Pending:
+    """Marks "a question is open" (so a second one is not asked) when the app, not a Qt box, will answer it."""
+
+
+class EndpointInfoWorker(QThread):
+    """Looks up which endpoint is active for a settings page (the lookup can take a network round trip)."""
+
+    finished_with = pyqtSignal(str)
+
+    def __init__(self, resolver: EndpointResolver) -> None:
+        super().__init__()
+        self._resolver = resolver
+
+    def run(self) -> None:
+        try:
+            resolution = self._resolver.resolve_active_endpoint(force_refresh=True)
+            self.finished_with.emit(f"{resolution.url or 'none'}  ({resolution.source}; {resolution.detail})")
+        except (OSError, ValueError) as exc:
+            self.finished_with.emit(f"unknown ({type(exc).__name__}: {exc})")
+
+
 class SearchWorker(QThread):
     """Runs one web search (and the optional smart-query rewrite) off the GUI thread."""
 
@@ -512,7 +533,8 @@ class OmniSightController(QObject):
         self._actions_cwd = Path(str(saved.value("actions_cwd", str(Path.home()))))
         self._action_dialog_open = False  # while it is open (and its output on screen) watch must not look at the screen
         self._run_dialog: RunDialog | None = None
-        self._allow_box: QMessageBox | None = None
+        self._allow_box: QMessageBox | _Pending | None = None
+        self._info_workers: list[QThread] = []
         self._search_enabled = bool(saved.value("web_search", False, type=bool))
         self._smart_enabled = bool(saved.value("smart_query", False, type=bool)) and self._search_enabled
         self.watch = WatchScheduler(_watch_interval())
@@ -565,6 +587,9 @@ class OmniSightController(QObject):
         self.window.smart_toggled.connect(self.set_smart_enabled)
         if hasattr(self.window, "peer_pid"):
             self.window.peer_pid.connect(self.foreground.add_own_pid)
+            self.window.settings_info_requested.connect(self.publish_settings_info)
+            self.window.settings_apply_requested.connect(self.apply_settings)
+            self.window.connection_test_requested.connect(self.run_connection_test)
         self.window.set_engine(self.settings.engine_choice)
         self.window.set_memory_enabled(self.memory.enabled)
         self.window.set_speak_available(self.speaker.available)
@@ -715,6 +740,59 @@ class OmniSightController(QObject):
         self._settings_dialog = SettingsDialog(self)
         self._settings_dialog.show()
         self._settings_dialog.raise_()
+
+    # -- settings for an external UI (the Qt window has its own dialog) --------------------------------------
+
+    def _settings_info(self, endpoint: str) -> dict[str, Any]:
+        return {
+            "endpoint": endpoint,
+            "override_url": self.settings.manual_override_url or "",
+            "local_url": self.settings.local_dev_url,
+            "capability": self.capability_line,
+            "fallback_url": self.settings.fallback_api_url or "",
+            "hotkeys": "Alt+C analyze   ·   hold Alt+V voice   ·   Esc hide",
+            "log_dir": str(default_log_dir()),
+        }
+
+    def publish_settings_info(self) -> None:
+        """Tell the app what its settings page shows; the active endpoint is looked up off this thread (it can touch the network)."""
+        send = getattr(self.window, "set_settings_info", None)
+        if send is None:
+            return
+        send(self._settings_info("checking…"))
+        worker = EndpointInfoWorker(self.resolver)
+        self._info_workers.append(worker)
+
+        def done(text: str) -> None:
+            send(self._settings_info(text))
+
+        worker.finished_with.connect(done)
+        worker.finished.connect(lambda w=worker: self._info_workers.remove(w) if w in self._info_workers else None)
+        worker.start()
+
+    def apply_settings(self, override: str, local_url: str) -> None:
+        result = getattr(self.window, "set_settings_result", None)
+        try:
+            self.set_override(override)
+            self.set_local_url(local_url)
+        except ValueError as exc:
+            if result is not None:
+                result(str(exc))
+            return
+        if result is not None:
+            result("Saved for this session.")
+        self.publish_settings_info()
+
+    def run_connection_test(self) -> None:
+        result = getattr(self.window, "set_settings_result", None)
+        if result is None:
+            return
+        result("Checking…")
+        worker = HealthCheckWorker(self.settings, self.resolver)
+        self._info_workers.append(worker)
+        worker.finished_with.connect(result)
+        worker.finished.connect(lambda w=worker: self._info_workers.remove(w) if w in self._info_workers else None)
+        worker.start()
 
     def set_override(self, url: str) -> None:
         self.settings = self.settings.with_override(url)
@@ -880,6 +958,16 @@ class OmniSightController(QObject):
         return box
 
     def _ask_allow_actions(self, on_answer: Callable[[bool], None]) -> None:
+        ask = getattr(self.window, "ask_allow_actions", None)
+        if ask is not None:  # the C# app asks in its own window; the answer is No if it cannot be reached
+            self._allow_box = _Pending()
+
+            def answered(yes: bool) -> None:
+                self._allow_box = None
+                on_answer(yes)
+
+            ask(ALLOW_ACTIONS_TITLE, ALLOW_ACTIONS_TEXT, answered)
+            return
         box = self._build_allow_box()
         self._allow_box = box
 

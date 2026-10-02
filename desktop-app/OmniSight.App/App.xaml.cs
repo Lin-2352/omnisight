@@ -1,6 +1,7 @@
 using System.Windows;
 using OmniSight.Core.Bridge;
 using OmniSight.Core.Hosting;
+using OmniSight.Core.Logging;
 using OmniSight.Core.Protocol;
 using OmniSight.Core.ViewModels;
 using Wpf.Ui.Appearance;
@@ -17,6 +18,20 @@ public partial class App : Application
     protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+        AppLog.Info("OmniSight app starting");
+        // A crash or a swallowed error should leave a trail in app.log.
+        DispatcherUnhandledException += (_, args) =>
+        {
+            AppLog.Error("unhandled UI exception", args.Exception);
+            _viewModel.Apply(new NoticeEvent("Something went wrong in the window. Details are in the app log (Options, Open logs).", true));
+            args.Handled = true;
+        };
+        AppDomain.CurrentDomain.UnhandledException += (_, args) => AppLog.Error("unhandled exception (the app is closing)", args.ExceptionObject as Exception);
+        TaskScheduler.UnobservedTaskException += (_, args) =>
+        {
+            AppLog.Error("unobserved task exception", args.Exception);
+            args.SetObserved();
+        };
         _viewModel.CommandRequested += OnCommand;
         _window = new MainWindow(_viewModel, StartEngineAsync);
         MainWindow = _window;
@@ -27,6 +42,7 @@ public partial class App : Application
 
     protected override void OnExit(ExitEventArgs e)
     {
+        AppLog.Info($"OmniSight app exiting (code {e.ApplicationExitCode})");
         // Disposing the client makes the Python client exit; the job object kills it if it ever does not.
         try
         {
@@ -75,6 +91,7 @@ public partial class App : Application
         try
         {
             _host = await PythonHost.StartAsync(new PythonHostOptions(root, Locator.FindPython(root), Locator.AppArguments));
+            AppLog.Info($"engine started (python pid {_host.ProcessId}, bridge port {_host.Port})");
             _client = new BridgeClient("127.0.0.1", _host.Port, _host.Token, Environment.ProcessId);
             _client.EventReceived += evt => Dispatcher.BeginInvoke(() => OnEvent(evt));
             _client.Disconnected += reason => Dispatcher.BeginInvoke(() => OnDisconnected(reason));
@@ -83,6 +100,7 @@ public partial class App : Application
         catch (Exception ex) when (ex is PythonHostException or BridgeException)
         {
             var detail = _host?.Diagnostics;
+            AppLog.Error("could not start or reach the engine", ex);
             _viewModel.SetFailed(string.IsNullOrWhiteSpace(detail) ? ex.Message : $"{ex.Message}  {detail}");
             await StopEngineAsync();
         }
@@ -100,6 +118,7 @@ public partial class App : Application
 
     private void OnDisconnected(string reason)
     {
+        AppLog.Warning($"engine connection ended: {reason}");
         if (_viewModel.Connection != ConnectionState.Failed)
         {
             _viewModel.SetDisconnected($"The engine stopped ({reason}). Use Restart engine.");

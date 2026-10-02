@@ -497,3 +497,108 @@ def test_a_late_client_gets_the_same_exchange_with_its_actions(qapp: Any, bridge
     peer.settle()
     ex = next(e for e in peer.events if e["event"] == "exchange")
     assert ex["actions"]["run"] and ex["segments"]
+
+
+# -- the "Allow running commands?" question, asked in the app: the safe answer is always No ----------------------------------
+
+
+def test_the_question_reaches_the_app_and_a_yes_answers_it_once(qapp: Any, bridge: BridgeWindow) -> None:
+    answers: list[bool] = []
+    peer = connect(qapp, bridge)
+    bridge.ask_allow_actions("Allow running commands?", "Turn it on?", answers.append)
+    ask = peer.wait_for("confirm")
+    assert ask["kind"] == "allow_actions" and ask["title"] == "Allow running commands?" and ask["text"] == "Turn it on?"
+    peer.send({"cmd": "answer", "id": ask["id"], "yes": True})
+    assert wait_until(lambda: answers == [True], 20, peer.pump)
+    peer.send({"cmd": "answer", "id": ask["id"], "yes": True})  # a second answer to the same question
+    assert "no such question" in peer.wait_for("error")["message"]
+    assert answers == [True]
+
+
+def test_a_no_answers_no(qapp: Any, bridge: BridgeWindow) -> None:
+    answers: list[bool] = []
+    peer = connect(qapp, bridge)
+    bridge.ask_allow_actions("t", "x", answers.append)
+    peer.send({"cmd": "answer", "id": peer.wait_for("confirm")["id"], "yes": False})
+    assert wait_until(lambda: answers == [False], 20, peer.pump)
+
+
+def test_with_nobody_connected_the_answer_is_no_at_once(qapp: Any, bridge: BridgeWindow) -> None:
+    answers: list[bool] = []
+    bridge.ask_allow_actions("t", "x", answers.append)
+    assert answers == [False]
+
+
+def test_if_the_app_goes_away_unanswered_the_answer_is_no(qapp: Any, bridge: BridgeWindow) -> None:
+    answers: list[bool] = []
+    peer = connect(qapp, bridge)
+    bridge.ask_allow_actions("t", "x", answers.append)
+    peer.wait_for("confirm")
+    peer.socket.disconnectFromHost()
+    assert wait_until(lambda: answers == [False], 20, peer.pump)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"cmd": "answer"}, {"cmd": "answer", "id": "nope", "yes": True}, {"cmd": "answer", "id": 5, "yes": True},
+        {"cmd": "answer", "id": "x", "yes": "yes"}, {"cmd": "answer", "id": "x", "yes": 1}, {"cmd": "answer", "id": "x"},
+    ],
+)
+def test_bad_or_invented_answers_change_nothing(qapp: Any, bridge: BridgeWindow, message: dict[str, Any]) -> None:
+    answers: list[bool] = []
+    peer = connect(qapp, bridge)
+    bridge.ask_allow_actions("t", "x", answers.append)
+    peer.wait_for("confirm")
+    peer.send(message)
+    peer.wait_for("error")
+    assert answers == []
+
+
+def test_each_question_has_its_own_unguessable_id(qapp: Any, bridge: BridgeWindow) -> None:
+    peer = connect(qapp, bridge)
+    for _ in range(5):
+        bridge.ask_allow_actions("t", "x", lambda _yes: None)
+    assert wait_until(lambda: sum(e["event"] == "confirm" for e in peer.events) == 5, 20, peer.pump)
+    ids = [e["id"] for e in peer.events if e["event"] == "confirm"]
+    assert len(set(ids)) == 5 and all(len(i) == 16 for i in ids)
+
+
+# -- settings commands ---------------------------------------------------------------------------------------------
+
+
+def test_settings_commands_emit_signals(qapp: Any, bridge: BridgeWindow) -> None:
+    seen: list[Any] = []
+    bridge.settings_info_requested.connect(lambda: seen.append("info"))
+    bridge.settings_apply_requested.connect(lambda o, local: seen.append((o, local)))
+    bridge.connection_test_requested.connect(lambda: seen.append("test"))
+    peer = connect(qapp, bridge)
+    peer.send({"cmd": "settings.get"})
+    peer.send({"cmd": "settings.apply", "override": "  https://a.trycloudflare.com  ", "local_url": " http://127.0.0.1:8000 "})
+    peer.send({"cmd": "test_connection"})
+    assert wait_until(lambda: len(seen) == 3, 20, peer.pump), seen
+    assert seen == ["info", ("https://a.trycloudflare.com", "http://127.0.0.1:8000"), "test"]
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"cmd": "settings.apply", "override": 5, "local_url": ""}, {"cmd": "settings.apply", "override": "", "local_url": None},
+        {"cmd": "settings.apply", "override": "x" * 501, "local_url": ""}, {"cmd": "settings.apply", "override": "", "local_url": "y" * 501},
+    ],
+)
+def test_bad_settings_are_refused_before_they_reach_the_controller(qapp: Any, bridge: BridgeWindow, message: dict[str, Any]) -> None:
+    applied: list[Any] = []
+    bridge.settings_apply_requested.connect(lambda o, local: applied.append((o, local)))
+    peer = connect(qapp, bridge)
+    peer.send(message)
+    peer.wait_for("error")
+    assert applied == []
+
+
+def test_settings_info_and_results_reach_the_app_and_info_is_replayed(qapp: Any, bridge: BridgeWindow) -> None:
+    bridge.set_settings_info({"endpoint": "http://x (gist)", "override_url": "", "local_url": "http://127.0.0.1:8000"})
+    peer = connect(qapp, bridge)
+    assert peer.wait_for("settings_info")["local_url"] == "http://127.0.0.1:8000"
+    bridge.set_settings_result("Saved for this session.")
+    assert peer.wait_for("settings_result")["text"] == "Saved for this session."

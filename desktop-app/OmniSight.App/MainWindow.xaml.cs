@@ -17,6 +17,7 @@ public partial class MainWindow : FluentWindow
 {
     private readonly ShellViewModel _viewModel;
     private readonly Func<Task> _restart;
+    private WindowSnapshot? _snapshot;
 
     public MainWindow(ShellViewModel viewModel, Func<Task> restart)
     {
@@ -37,16 +38,35 @@ public partial class MainWindow : FluentWindow
         _viewModel.Conversation.CollectionChanged += (_, _) => Dispatcher.BeginInvoke(() => Scroller.ScrollToEnd(), System.Windows.Threading.DispatcherPriority.Background);
         _viewModel.CopyRequested += text => _ = CopyAsync(text);
         _viewModel.OpenLinkRequested += OpenInBrowser;
+        _viewModel.ConfirmRequested += confirm => _ = ConfirmAsync(confirm);
+        _viewModel.OpenFolderRequested += OpenFolder;
         RichText.LinkClicked += OnRichTextLink;
         Closed += (_, _) => RichText.LinkClicked -= OnRichTextLink;
         SyncNotice();
-        Loaded += (_, _) => AskBox.Focus();
+        Loaded += (_, _) =>
+        {
+            AskBox.Focus();
+            _snapshot = WindowSnapshot.StartIfRequested(this);
+        };
     }
 
     private void OnRichTextLink(string url) => _viewModel.OpenLink(url);
 
+    /// <summary>The options pane's width including its margin; the window grows by this much so the answers keep their room.</summary>
+    private const double PaneWidth = 384;
+
     private void OnViewModelChanged(object? sender, PropertyChangedEventArgs e)
     {
+        if (e.PropertyName == nameof(ShellViewModel.IsPaneOpen) && WindowState == WindowState.Normal)
+        {
+            var work = SystemParameters.WorkArea;
+            Width = Math.Clamp(Width + (_viewModel.IsPaneOpen ? PaneWidth : -PaneWidth), MinWidth, work.Width);
+            if (Left + Width > work.Right)
+            {
+                Left = Math.Max(work.Left, work.Right - Width);
+            }
+        }
+
         if (e.PropertyName is nameof(ShellViewModel.NoticeText) or nameof(ShellViewModel.NoticeIsError))
         {
             SyncNotice();
@@ -77,6 +97,18 @@ public partial class MainWindow : FluentWindow
     private void OnMic(object sender, RoutedEventArgs e) => _viewModel.Mic();
 
     private void OnClear(object sender, RoutedEventArgs e) => _viewModel.Clear();
+
+    private void OnNode(object sender, RoutedEventArgs e) => _viewModel.ToggleNode();
+
+    private void OnStopVoice(object sender, RoutedEventArgs e) => _viewModel.StopVoice();
+
+    private void OnPauseWatch(object sender, RoutedEventArgs e) => _viewModel.PauseWatch();
+
+    private void OnApplySettings(object sender, RoutedEventArgs e) => _viewModel.ApplySettings();
+
+    private void OnTestConnection(object sender, RoutedEventArgs e) => _viewModel.TestConnection();
+
+    private void OnOpenLogs(object sender, RoutedEventArgs e) => _viewModel.OpenLogs();
 
     private async void OnRestart(object sender, RoutedEventArgs e)
     {
@@ -148,6 +180,47 @@ public partial class MainWindow : FluentWindow
         }
 
         return null;
+    }
+
+    // -- questions from Python -------------------------------------------------------------------
+
+    /// <summary>
+    /// Shows Python's question inside the window (not a nested message loop, so assistive tools stay responsive). The default
+    /// answer is No, closing the dialog is No, and only the explicit "Turn on" button is Yes.
+    /// </summary>
+    private async Task ConfirmAsync(ConfirmEvent question)
+    {
+        var yes = false;
+        try
+        {
+            var dialog = new ContentDialog(DialogHost)
+            {
+                Title = question.Title,
+                Content = new TextBlock { Text = question.Text, TextWrapping = TextWrapping.Wrap, MaxWidth = 460 },
+                PrimaryButtonText = "Turn on",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Close,
+            };
+            yes = await dialog.ShowAsync() == ContentDialogResult.Primary;
+        }
+        catch (Exception)
+        {
+            yes = false;  // anything unexpected is No
+        }
+
+        _viewModel.AnswerConfirm(question.Id, yes);
+    }
+
+    private void OpenFolder(string folder)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo("explorer.exe") { ArgumentList = { folder }, UseShellExecute = false });
+        }
+        catch (Exception ex) when (ex is Win32Exception or InvalidOperationException)
+        {
+            _viewModel.Apply(new NoticeEvent("Could not open the folder.", true));
+        }
     }
 
     // -- clipboard and links (both already validated by the view model) -----------------------------

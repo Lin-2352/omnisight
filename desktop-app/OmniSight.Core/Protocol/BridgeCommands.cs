@@ -19,6 +19,10 @@ public static class BridgeCommands
     public static string Settings() => Build(("cmd", "settings"));
     public static string StopSpeaking() => Build(("cmd", "stop_speaking"));
     public static string WatchPause() => Build(("cmd", "watch_pause"));
+    public static string Answer(string id, bool yes) => Build(("cmd", "answer"), ("id", id), ("yes", yes));
+    public static string SettingsGet() => Build(("cmd", "settings.get"));
+    public static string SettingsApply(string overrideUrl, string localUrl) => Build(("cmd", "settings.apply"), ("override", overrideUrl), ("local_url", localUrl));
+    public static string TestConnection() => Build(("cmd", "test_connection"));
     public static string Run(string language, string command) => Build(("cmd", "run"), ("language", language), ("command", command));
 
     public static string Set(string name, bool on)

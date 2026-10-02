@@ -18,6 +18,20 @@ public sealed record ShowEvent : BridgeEvent;
 public sealed record PongEvent : BridgeEvent;
 public sealed record ErrorEvent(string Message) : BridgeEvent;
 
+/// <summary>A question Python needs answered (today only "allow running commands"). The safe answer is No.</summary>
+public sealed record ConfirmEvent(string Id, string Kind, string Title, string Text) : BridgeEvent;
+
+public sealed record SettingsInfoEvent(
+    string Endpoint,
+    string OverrideUrl,
+    string LocalUrl,
+    string Capability,
+    string FallbackUrl,
+    string Hotkeys,
+    string LogDir) : BridgeEvent;
+
+public sealed record SettingsResultEvent(string Text) : BridgeEvent;
+
 public sealed record EngineChoice(string Key, string Label)
 {
     /// <summary>What a list or a screen reader shows for this choice.</summary>
